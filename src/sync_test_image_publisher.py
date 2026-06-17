@@ -11,16 +11,37 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 class SyncTestImagePublisher(Node):
     def __init__(self):
         super().__init__('sync_test_image_publisher')
-        
-        # Path to your pre-undistorted images
-        self.image_dir = Path("/home/robot/fastlio_ws/data/2026-06-11-HKUMTR/camera/right")
+
+        # Parameters
+        self.declare_parameter('image_dir', '/home/robot/fastlio_ws/data/2026-06-11-HKUMTR/camera/right')
+        self.declare_parameter('image_topic', '/camera/image_undistorted')
+        self.declare_parameter('camera_info_topic', '/camera/camera_info')
+        self.declare_parameter('lidar_topic', '/livox/lidar')
+        self.declare_parameter('camera_frame', 'camera_link')
+        self.declare_parameter('camera_fx', 1194.768718613003)
+        self.declare_parameter('camera_fy', 1194.8852276046334)
+        self.declare_parameter('camera_cx', 1549.7229681677704)
+        self.declare_parameter('camera_cy', 2026.345441202774)
+
+        image_dir = self.get_parameter('image_dir').value
+        image_topic = self.get_parameter('image_topic').value
+        camera_info_topic = self.get_parameter('camera_info_topic').value
+        lidar_topic = self.get_parameter('lidar_topic').value
+        camera_frame = self.get_parameter('camera_frame').value
+        fx = self.get_parameter('camera_fx').value
+        fy = self.get_parameter('camera_fy').value
+        cx = self.get_parameter('camera_cx').value
+        cy = self.get_parameter('camera_cy').value
+
+        # Path to pre-undistorted images
+        self.image_dir = Path(image_dir)
         self.image_files = sorted(list(self.image_dir.glob("*.png")) + list(self.image_dir.glob("*.jpg")))
         self.current_image_idx = 0
-        
+
         self.bridge = CvBridge()
-        self.pub_img = self.create_publisher(Image, '/camera/image_undistorted', 10)
-        self.pub_info = self.create_publisher(CameraInfo, '/camera/camera_info', 10)
-        
+        self.pub_img = self.create_publisher(Image, image_topic, 10)
+        self.pub_info = self.create_publisher(CameraInfo, camera_info_topic, 10)
+
         # Subscribe to the RAW LiDAR topic from the bag to trigger image publishing
         lidar_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -30,23 +51,24 @@ class SyncTestImagePublisher(Node):
 
         # Subscribe to the RAW LiDAR topic using the new QoS profile
         self.sub_lidar = self.create_subscription(
-            PointCloud2, 
-            '/livox/lidar', 
-            self.lidar_callback, 
+            PointCloud2,
+            lidar_topic,
+            self.lidar_callback,
             lidar_qos
         )
-        
+
         # Camera Info with actual undistorted intrinsics from calibration.json
         # (right camera, already undistorted before fusion)
         self.camera_info = CameraInfo()
         self.camera_info.distortion_model = 'plumb_bob'
         self.camera_info.d = [0.0, 0.0, 0.0, 0.0, 0.0]  # Undistorted = 0
         self.camera_info.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-        # Intrinsics from calibration.json (right camera)
-        fx, fy, cx, cy = 1194.768718613003, 1194.8852276046334, 1549.7229681677704, 2026.345441202774
+        # Intrinsics from parameters
         self.camera_info.k = [fx, 0.0, cx, 0.0, fy, cy, 0.0, 0.0, 1.0]
         self.camera_info.p = [fx, 0.0, cx, 0.0, 0.0, fy, cy, 0.0, 0.0, 0.0, 1.0, 0.0]
-        
+
+        self._camera_frame = camera_frame
+
         self.get_logger().info(f"Loaded {len(self.image_files)} images for sync testing.")
 
     def _time_from_filename(self, img_path: Path):
@@ -68,22 +90,22 @@ class SyncTestImagePublisher(Node):
 
     def lidar_callback(self, lidar_msg):
         if self.current_image_idx >= len(self.image_files):
-            self.current_image_idx = 0 # Loop back for continuous testing
-            
+            self.current_image_idx = 0  # Loop back for continuous testing
+
         img_path = self.image_files[self.current_image_idx]
         self.current_image_idx += 1
-        
+
         try:
             cv_image = cv2.imread(str(img_path))
             if cv_image is None:
                 return
-            
+
             # Update dimensions dynamically based on the actual image
             self.camera_info.height = cv_image.shape[0]
             self.camera_info.width = cv_image.shape[1]
-                
+
             img_msg = self.bridge.cv2_to_imgmsg(cv_image, encoding='bgr8')
-            
+
             # Use timestamp encoded in filename if available; otherwise fallback to LiDAR stamp
             file_time = self._time_from_filename(img_path)
             if file_time is not None:
@@ -93,12 +115,12 @@ class SyncTestImagePublisher(Node):
                 img_msg.header = lidar_msg.header
                 self.camera_info.header = lidar_msg.header
 
-            img_msg.header.frame_id = 'camera_link'
-            self.camera_info.header.frame_id = 'camera_link'
-            
+            img_msg.header.frame_id = self._camera_frame
+            self.camera_info.header.frame_id = self._camera_frame
+
             self.pub_img.publish(img_msg)
             self.pub_info.publish(self.camera_info)
-            
+
         except Exception as e:
             self.get_logger().error(f"Failed to publish image: {e}")
 

@@ -1,18 +1,33 @@
 import os
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess, IncludeLaunchDescription
+from launch.actions import ExecuteProcess, IncludeLaunchDescription, DeclareLaunchArgument
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
+    # Config file path
+    config_file = os.path.join(
+        get_package_share_directory('inspection_grounding'),
+        'config',
+        'params.yaml'
+    )
+
+    # Launch arguments
+    bag_path_arg = DeclareLaunchArgument(
+        'bag_path',
+        default_value='/home/robot/fastlio_ws/rosbags/2026-06-11_16-50-08/data/bag/bag.db3',
+        description='Path to the ROS2 bag file'
+    )
+    bag_path = LaunchConfiguration('bag_path')
+
     # 1. Play the ROS 2 bag with simulated clock
-    bag_path = "/home/robot/fastlio_ws/rosbags/2026-06-11_16-50-08/data/bag/bag.db3"
     bag_play = ExecuteProcess(
         cmd=['ros2', 'bag', 'play', '-s', 'sqlite3', bag_path, '--clock'],
         output='screen'
     )
-    
+
     # 2. Launch FAST-LIO
     fastlio_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
@@ -20,41 +35,35 @@ def generate_launch_description():
         ]),
         launch_arguments={'use_sim_time': 'true'}.items()
     )
-    
+
     # 3. Mock Image Publisher (syncs undistorted images to LiDAR timestamps)
     mock_image_pub = Node(
         package='inspection_grounding',
         executable='sync_test_image_publisher.py',
         name='sync_test_image_publisher',
         output='screen',
-        parameters=[{'use_sim_time': True}]
+        parameters=[config_file, {'use_sim_time': True}]
     )
-    
+
     # 4. The Sync Node (to verify it receives both)
     sync_node = Node(
         package='inspection_grounding',
         executable='sync_node.py',
         name='sync_node',
         output='screen',
-        parameters=[{'use_sim_time': True}]
+        parameters=[config_file, {'use_sim_time': True}]
     )
-    
-    # 5. The YAML Fusion Node (NEW)
+
+    # 5. The YAML Fusion Node
     # Subscribes to /cloud_registered, checks for matching YAML, outputs colored PC and TF
     yaml_fusion_node = Node(
         package='inspection_grounding',
         executable='fusion_yaml_node.py',
         name='fusion_yaml_node',
         output='screen',
-        parameters=[{
-            'yaml_dir': '/home/robot/fastlio_ws/masks/Ground_Truth_20',
-            'output_dir': '/home/robot/fastlio_ws/legacy_outputs', 
-            'target_frame': 'camera_init',
-            'camera_frame': 'camera_link',
-            'use_sim_time': True
-        }]
+        parameters=[config_file, {'use_sim_time': True}]
     )
-    
+
     # 6. RViz2 for visualization
     rviz_node = Node(
         package='rviz2',
@@ -92,6 +101,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        bag_path_arg,
         bag_play,
         fastlio_launch,
         mock_image_pub,

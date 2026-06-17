@@ -36,5 +36,10 @@ install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
 )
 
-# 5. Finalize the package
+# 5. Install config files
+install(DIRECTORY config
+  DESTINATION share/${PROJECT_NAME}
+)
+
+# 6. Finalize the package
 ament_package()

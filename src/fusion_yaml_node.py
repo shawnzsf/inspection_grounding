@@ -50,22 +50,27 @@ class FusionYamlNode(Node):
         self.declare_parameter('output_dir', '/home/robot/fastlio_ws/legacy_outputs')
         self.declare_parameter('target_frame', 'camera_init')
         self.declare_parameter('camera_frame', 'camera_link')
+        self.declare_parameter('camera_fx', 1194.768718613003)
+        self.declare_parameter('camera_fy', 1194.8852276046334)
+        self.declare_parameter('camera_cx', 1549.7229681677704)
+        self.declare_parameter('camera_cy', 2026.345441202774)
+        self.declare_parameter('bbox_vis_depth', 2.0)
 
         self.yaml_dir = Path(self.get_parameter('yaml_dir').value)
         self.output_dir = Path(self.get_parameter('output_dir').value)
         self.target_frame = self.get_parameter('target_frame').value
         self.camera_frame = self.get_parameter('camera_frame').value
 
-        os.makedirs(self.output_dir, exist_ok=True)
-
         # Camera intrinsics (undistorted, right camera)
-        self.fx = 1194.768718613003
-        self.fy = 1194.8852276046334
-        self.cx = 1549.7229681677704
-        self.cy = 2026.345441202774
+        self.fx = self.get_parameter('camera_fx').value
+        self.fy = self.get_parameter('camera_fy').value
+        self.cx = self.get_parameter('camera_cx').value
+        self.cy = self.get_parameter('camera_cy').value
 
         # Bbox visualization depth in camera frame
-        self.bbox_vis_depth = 2.0
+        self.bbox_vis_depth = self.get_parameter('bbox_vis_depth').value
+
+        os.makedirs(self.output_dir, exist_ok=True)
 
         # TF
         self.tf_buffer = tf2_ros.Buffer()

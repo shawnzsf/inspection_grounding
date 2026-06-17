@@ -1,0 +1,56 @@
+# Inspection Grounding Parameters
+# =================================
+# All configurable parameters for the inspection_grounding package nodes.
+# This file is loaded by the launch files and passed to each node.
+
+fusion_yaml_node:
+  ros__parameters:
+    # --- Directory paths ---
+    yaml_dir: "/home/shawnzsf/grounding_ws/masks"
+    output_dir: "/home/shawnzsf/grounding_ws/legacy_outputs"
+
+    # --- Frame names ---
+    target_frame: "camera_init"
+    camera_frame: "camera_link"
+
+    # --- Camera intrinsics (undistorted right camera) ---
+    camera_fx: 1194.768718613003
+    camera_fy: 1194.8852276046334
+    camera_cx: 1549.7229681677704
+    camera_cy: 2026.345441202774
+
+    # --- Bbox visualization depth in camera frame (meters) ---
+    bbox_vis_depth: 2.0
+
+sync_node:
+  ros__parameters:
+    # --- Input topics ---
+    image_topic: "/camera/image_undistorted"
+    camera_info_topic: "/camera/camera_info"
+    pointcloud_topic: "/cloud_registered"
+
+    # --- Output topic ---
+    output_topic: "/synced_sensor_data"
+
+    # --- Synchronizer parameters ---
+    sync_queue_size: 10
+    sync_slop: 0.05
+
+sync_test_image_publisher:
+  ros__parameters:
+    # --- Image directory path ---
+    image_dir: "/home/shawnzsf/grounding_ws/data/2026-06-11-HKUMTR/camera/right"
+
+    # --- Topics ---
+    image_topic: "/camera/image_undistorted"
+    camera_info_topic: "/camera/camera_info"
+    lidar_topic: "/livox/lidar"
+
+    # --- Camera frame ---
+    camera_frame: "camera_link"
+
+    # --- Camera intrinsics (undistorted right camera) ---
+    camera_fx: 1194.768718613003
+    camera_fy: 1194.8852276046334
+    camera_cx: 1549.7229681677704
+    camera_cy: 2026.345441202774
