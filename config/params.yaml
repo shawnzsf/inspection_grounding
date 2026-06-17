@@ -21,6 +21,7 @@ fusion_yaml_node:
 
     # --- Bbox visualization depth in camera frame (meters) ---
     bbox_vis_depth: 2.0
+    max_aggregated_points: 500000  # Max points in /pointcloud/segmented_yaml_aggregated
 
 sync_node:
   ros__parameters:

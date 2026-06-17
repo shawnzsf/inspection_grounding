@@ -55,6 +55,7 @@ class FusionYamlNode(Node):
         self.declare_parameter('camera_cx', 1549.7229681677704)
         self.declare_parameter('camera_cy', 2026.345441202774)
         self.declare_parameter('bbox_vis_depth', 2.0)
+        self.declare_parameter('max_aggregated_points', 500000)
 
         self.yaml_dir = Path(self.get_parameter('yaml_dir').value)
         self.output_dir = Path(self.get_parameter('output_dir').value)
@@ -87,6 +88,9 @@ class FusionYamlNode(Node):
         self.pub_pc = self.create_publisher(
             PointCloud2, '/pointcloud/segmented_yaml', reliable_qos
         )
+        self.pub_pc_aggregated = self.create_publisher(
+            PointCloud2, '/pointcloud/segmented_yaml_aggregated', reliable_qos
+        )
         self.pub_pose = self.create_publisher(
             PoseStamped, '/object/global_pose', reliable_qos
         )
@@ -110,6 +114,11 @@ class FusionYamlNode(Node):
         self.last_bboxes = []
         self.last_centroid = None
         self.last_stamp = None
+
+        # Accumulated segmented points in world frame (for aggregate topic)
+        self._aggregated_pts = np.empty((0, 3), dtype=np.float32)
+        self._max_aggregated_points = self.get_parameter('max_aggregated_points').value
+        self._last_aggregated_stamp = None
 
         # Unique marker ID counter (so markers accumulate instead of overwriting)
         self._marker_id_counter = 0
@@ -524,6 +533,25 @@ class FusionYamlNode(Node):
             except Exception as e:
                 self.get_logger().warn(f"Failed to publish segmented PointCloud2: {e}")
 
+            # Accumulate segmented points in world frame for aggregate topic
+            self._aggregated_pts = np.vstack(
+                [self._aggregated_pts, segmented_pts_pub.astype(np.float32)]
+            )
+            # Trim if exceeding max size (keep most recent points)
+            if self._aggregated_pts.shape[0] > self._max_aggregated_points:
+                self._aggregated_pts = self._aggregated_pts[-self._max_aggregated_points:]
+            self._last_aggregated_stamp = stamp
+
+            # Publish aggregated PointCloud2
+            try:
+                agg_header = Header(stamp=stamp, frame_id=self.target_frame)
+                agg_cloud = [[float(x), float(y), float(z)]
+                             for x, y, z in self._aggregated_pts]
+                agg_msg = point_cloud2.create_cloud_xyz32(agg_header, agg_cloud)
+                self.pub_pc_aggregated.publish(agg_msg)
+            except Exception as e:
+                self.get_logger().warn(f"Failed to publish aggregated PointCloud2: {e}")
+
             # Publish centroid marker (only for new YAML to avoid duplicates)
             if is_new_yaml:
                 self._publish_centroid_marker(centroid_pub, stamp)
@@ -566,11 +594,25 @@ class FusionYamlNode(Node):
 
         Markers are NOT republished — they use unique IDs and persist in RViz
         once added. Only PointCloud2 and PoseStamped need refreshing.
+        The aggregated cloud is also republished so late-joining RViz clients
+        receive the full accumulated segmentation.
         """
         if self.last_pc_msg is not None:
             self.pub_pc.publish(self.last_pc_msg)
         if self.last_pose is not None:
             self.pub_pose.publish(self.last_pose)
+        if self._aggregated_pts.shape[0] > 0 and self._last_aggregated_stamp is not None:
+            try:
+                agg_header = Header(
+                    stamp=self._last_aggregated_stamp,
+                    frame_id=self.target_frame
+                )
+                agg_cloud = [[float(x), float(y), float(z)]
+                             for x, y, z in self._aggregated_pts]
+                agg_msg = point_cloud2.create_cloud_xyz32(agg_header, agg_cloud)
+                self.pub_pc_aggregated.publish(agg_msg)
+            except Exception:
+                pass
 
 
 def main(args=None):
