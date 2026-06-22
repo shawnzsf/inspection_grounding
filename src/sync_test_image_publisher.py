@@ -38,12 +38,14 @@ class SyncTestImagePublisher(Node):
         
         # Camera Info with actual undistorted intrinsics from calibration.json
         # (right camera, already undistorted before fusion)
+        # Calibration is for 3040x4032, but actual images are 1520x2016 (half-res).
+        # The undistort script scales intrinsics by 0.5, so we use the scaled values.
         self.camera_info = CameraInfo()
         self.camera_info.distortion_model = 'plumb_bob'
         self.camera_info.d = [0.0, 0.0, 0.0, 0.0, 0.0]  # Undistorted = 0
         self.camera_info.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-        # Intrinsics from calibration.json (right camera)
-        fx, fy, cx, cy = 1194.768718613003, 1194.8852276046334, 1549.7229681677704, 2026.345441202774
+        # Intrinsics from calibration.json (right camera), scaled to 1520x2016
+        fx, fy, cx, cy = 597.3843593065015, 597.4426138023167, 774.8614840838852, 1013.172720601387
         self.camera_info.k = [fx, 0.0, cx, 0.0, fy, cy, 0.0, 0.0, 1.0]
         self.camera_info.p = [fx, 0.0, cx, 0.0, 0.0, fy, cy, 0.0, 0.0, 0.0, 1.0, 0.0]
         

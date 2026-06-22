@@ -50,19 +50,26 @@ class FusionYamlNode(Node):
         self.declare_parameter('output_dir', '/home/robot/fastlio_ws/legacy_outputs')
         self.declare_parameter('target_frame', 'camera_init')
         self.declare_parameter('camera_frame', 'camera_link')
+        # Scale factor for bbox coordinates if annotation resolution differs
+        # from the camera intrinsics resolution. Set to 1.0 when they match.
+        self.declare_parameter('bbox_scale', 1.0)
 
         self.yaml_dir = Path(self.get_parameter('yaml_dir').value)
         self.output_dir = Path(self.get_parameter('output_dir').value)
         self.target_frame = self.get_parameter('target_frame').value
         self.camera_frame = self.get_parameter('camera_frame').value
+        self.bbox_scale = float(self.get_parameter('bbox_scale').value)
 
         os.makedirs(self.output_dir, exist_ok=True)
 
         # Camera intrinsics (undistorted, right camera)
-        self.fx = 1194.768718613003
-        self.fy = 1194.8852276046334
-        self.cx = 1549.7229681677704
-        self.cy = 2026.345441202774
+        # Calibration is for 3040x4032, but actual images are 1520x2016 (half-res).
+        # The undistort script scales intrinsics by 0.5, so we use the scaled values
+        # to match the actual image/bbox coordinate space.
+        self.fx = 597.3843593065015    # 1194.768718613003 * 0.5
+        self.fy = 597.4426138023167    # 1194.8852276046334 * 0.5
+        self.cx = 774.8614840838852    # 1549.7229681677704 * 0.5
+        self.cy = 1013.172720601387    # 2026.345441202774 * 0.5
 
         # Bbox visualization depth in camera frame
         self.bbox_vis_depth = 2.0
@@ -82,11 +89,21 @@ class FusionYamlNode(Node):
         self.pub_pc = self.create_publisher(
             PointCloud2, '/pointcloud/segmented_yaml', reliable_qos
         )
+        self.pub_pc_aggregated = self.create_publisher(
+            PointCloud2, '/pointcloud/segmented_yaml_aggregated', reliable_qos
+        )
         self.pub_pose = self.create_publisher(
             PoseStamped, '/object/global_pose', reliable_qos
         )
+        # Marker publisher needs higher depth for frames with many bboxes
+        marker_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=200,
+            durability=DurabilityPolicy.VOLATILE
+        )
         self.pub_bbox = self.create_publisher(
-            Marker, '/bbox_marker', reliable_qos
+            Marker, '/bbox_marker', marker_qos
         )
 
         # Subscribers
@@ -105,6 +122,10 @@ class FusionYamlNode(Node):
         self.last_bboxes = []
         self.last_centroid = None
         self.last_stamp = None
+
+        # Accumulated points across all frames (in target/global frame)
+        self.aggregated_pts = None  # (N, 3) array or None
+        self.last_aggregated_msg = None
 
         # Unique marker ID counter (so markers accumulate instead of overwriting)
         self._marker_id_counter = 0
@@ -132,6 +153,7 @@ class FusionYamlNode(Node):
             none found.
         """
         bboxes = []
+        s = self.bbox_scale
 
         # New format: bounding_boxes list
         bb_list = data.get('bounding_boxes')
@@ -140,10 +162,10 @@ class FusionYamlNode(Node):
                 if isinstance(entry, dict):
                     try:
                         bboxes.append((
-                            float(entry['x_min']),
-                            float(entry['y_min']),
-                            float(entry['x_max']),
-                            float(entry['y_max']),
+                            float(entry['x_min']) * s,
+                            float(entry['y_min']) * s,
+                            float(entry['x_max']) * s,
+                            float(entry['y_max']) * s,
                         ))
                     except (KeyError, ValueError):
                         continue
@@ -154,10 +176,10 @@ class FusionYamlNode(Node):
             if isinstance(bbox, dict):
                 try:
                     bboxes.append((
-                        float(bbox['x_min']),
-                        float(bbox['y_min']),
-                        float(bbox['x_max']),
-                        float(bbox['y_max']),
+                        float(bbox['x_min']) * s,
+                        float(bbox['y_min']) * s,
+                        float(bbox['x_max']) * s,
+                        float(bbox['y_max']) * s,
                     ))
                 except (KeyError, ValueError):
                     pass
@@ -519,6 +541,28 @@ class FusionYamlNode(Node):
             except Exception as e:
                 self.get_logger().warn(f"Failed to publish segmented PointCloud2: {e}")
 
+            # Accumulate segmented points (in target frame) and publish aggregated cloud
+            try:
+                if self.aggregated_pts is None:
+                    self.aggregated_pts = segmented_pts_pub.copy()
+                else:
+                    self.aggregated_pts = np.vstack(
+                        (self.aggregated_pts, segmented_pts_pub)
+                    )
+                agg_header = Header(stamp=stamp, frame_id=self.target_frame)
+                agg_cloud_out = [
+                    [float(x), float(y), float(z)]
+                    for x, y, z in self.aggregated_pts
+                ]
+                self.last_aggregated_msg = point_cloud2.create_cloud_xyz32(
+                    agg_header, agg_cloud_out
+                )
+                self.pub_pc_aggregated.publish(self.last_aggregated_msg)
+            except Exception as e:
+                self.get_logger().warn(
+                    f"Failed to publish aggregated PointCloud2: {e}"
+                )
+
             # Publish centroid marker (only for new YAML to avoid duplicates)
             if is_new_yaml:
                 self._publish_centroid_marker(centroid_pub, stamp)
@@ -566,6 +610,8 @@ class FusionYamlNode(Node):
             self.pub_pc.publish(self.last_pc_msg)
         if self.last_pose is not None:
             self.pub_pose.publish(self.last_pose)
+        if self.last_aggregated_msg is not None:
+            self.pub_pc_aggregated.publish(self.last_aggregated_msg)
 
 
 def main(args=None):

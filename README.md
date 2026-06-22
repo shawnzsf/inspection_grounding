@@ -93,6 +93,7 @@ src/inspection_grounding/
 |-----------|-------|------|-----|
 | Sub | `/cloud_registered_body` | `sensor_msgs/PointCloud2` | BEST_EFFORT, KEEP_LAST(10) |
 | Pub | `/pointcloud/segmented_yaml` | `sensor_msgs/PointCloud2` | RELIABLE, KEEP_LAST(10) |
+| Pub | `/pointcloud/segmented_yaml_aggregated` | `sensor_msgs/PointCloud2` | RELIABLE, KEEP_LAST(10) |
 | Pub | `/object/global_pose` | `geometry_msgs/PoseStamped` | RELIABLE, KEEP_LAST(10) |
 | Pub | `/bbox_marker` | `visualization_msgs/Marker` | RELIABLE, KEEP_LAST(10) |
 
@@ -152,13 +153,16 @@ PointCloud2 msg
       ▼
 ┌──────────────────────────┐
 │ 8. Publish & save        │  • PointCloud2 (segmented, in target frame)
+│                          │  • PointCloud2 (aggregated, accumulated in target frame)
 │                          │  • PoseStamped (centroid, in target frame)
 │                          │  • Marker (bbox frustum + centroid sphere)
 │                          │  • PCD file (ASCII, in source frame)
 └──────────────────────────┘
 ```
 
-**Republishing** — A 2 Hz timer (`_republish_callback`) re-emits the last segmented cloud, pose, and markers so RViz always has data to display even when the input is single-shot.
+**Aggregated cloud** — The `/pointcloud/segmented_yaml_aggregated` topic accumulates all segmented points (transformed to the target/global frame) across every processed frame. This provides a growing point cloud of all detected objects in the world frame, useful for building up a complete inspection map.
+
+**Republishing** — A 2 Hz timer (`_republish_callback`) re-emits the last segmented cloud, aggregated cloud, pose, and markers so RViz always has data to display even when the input is single-shot.
 
 **Bbox visualization** — The bbox is drawn as a `LINE_LIST` marker in the camera frame: a rectangle at `bbox_vis_depth` (2.0 m) plus four rays from the camera origin to each corner, forming a frustum.
 
@@ -191,9 +195,10 @@ PointCloud2 msg
                    │                 │                   │
                    ▼                 ▼                   ▼
      /camera/image_undistorted  /synced_sensor_data  /pointcloud/segmented_yaml
-     /camera/camera_info                              /object/global_pose
-                                                      /bbox_marker
-                                                      *.pcd files
+     /camera/camera_info                              /pointcloud/segmented_yaml_aggregated
+                                                       /object/global_pose
+                                                       /bbox_marker
+                                                       *.pcd files
 ```
 
 **Two independent paths:**
@@ -332,6 +337,9 @@ ros2 launch inspection_grounding test_fusion.launch.py
 ```bash
 # Segmented point cloud topic
 ros2 topic echo /pointcloud/segmented_yaml
+
+# Aggregated point cloud (all frames accumulated in global frame)
+ros2 topic echo /pointcloud/segmented_yaml_aggregated
 
 # Object centroid pose
 ros2 topic echo /object/global_pose
