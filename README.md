@@ -12,6 +12,7 @@ The package synchronizes camera images with LiDAR point clouds, projects 3D poin
    - [sync_node](#1-sync_nodepy)
    - [sync_test_image_publisher](#2-sync_test_image_publisherpy)
    - [fusion_yaml_node](#3-fusion_yaml_nodepy)
+   - [rerun_bridge_node](#4-rerun_bridge_nodepy)
 3. [Inter-Node Data Flow](#inter-node-data-flow)
 4. [Custom Messages](#custom-messages)
 5. [Launch Files](#launch-files)
@@ -32,10 +33,12 @@ src/inspection_grounding/
 ├── src/
 │   ├── sync_node.py                      # time-synchronizer node
 │   ├── sync_test_image_publisher.py      # offline image replay node (test only)
-│   └── fusion_yaml_node.py               # 2D-bbox → 3D pointcloud segmentation node
+│   ├── fusion_yaml_node.py               # 2D-bbox → 3D pointcloud segmentation node
+│   └── rerun_bridge_node.py              # ROS 2 → Rerun visualization bridge
 └── launch/
     ├── test_sync.launch.py               # sync pipeline test
-    └── test_fusion.launch.py             # full fusion pipeline test
+    ├── test_fusion.launch.py             # full fusion pipeline test (RViz)
+    └── test_fusion_rerun.launch.py       # full fusion pipeline test (Rerun)
 ```
 
 ---
@@ -168,6 +171,42 @@ PointCloud2 msg
 
 ---
 
+### 4. `rerun_bridge_node.py`
+
+**Purpose** — Bridge node that subscribes to ROS 2 topics and logs them to a [Rerun](https://www.rerun.io/) viewer for 3D visualization. Provides an alternative to RViz with a built-in viewer window.
+
+| Direction | Topic | Type | QoS |
+|-----------|-------|------|-----|
+| Sub | `/Laser_map` | `sensor_msgs/PointCloud2` | RELIABLE, KEEP_LAST(5) |
+| Sub | `/pointcloud/segmented_yaml` | `sensor_msgs/PointCloud2` | RELIABLE, KEEP_LAST(5) |
+| Sub | `/pointcloud/segmented_yaml_aggregated` | `sensor_msgs/PointCloud2` | RELIABLE, KEEP_LAST(5) |
+| TF | `camera_init` → `body` | `geometry_msgs/TransformStamped` | via tf2 |
+| TF | `body` → `camera_link` | `geometry_msgs/TransformStamped` | via tf2 |
+
+**Parameters**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `leveling_rpy_deg` | `[0.0, 0.0, 0.0]` | Optional roll/pitch/yaw (degrees) for visualization-only leveling rotation |
+
+**Visualization details:**
+
+| Entity Path | Content | Color |
+|-------------|---------|-------|
+| `world/leveled/camera_init/Laser_map` | `/Laser_map` point cloud | Intensity-based grayscale |
+| `world/leveled/camera_init/segmented_yaml` | Per-frame segmented points | Green |
+| `world/leveled/camera_init/segmented_yaml_aggregated` | Accumulated segmented points | Yellow |
+| `world/leveled/camera_init/axes` | `camera_init` frame axes | RGB (X=red, Y=green, Z=blue) |
+| `world/leveled/camera_init/body/axes` | `body` frame axes | RGB |
+| `world/leveled/camera_init/body/camera_link/axes` | `camera_link` frame axes | RGB |
+
+- All point clouds are logged under `camera_init/` so they're correctly positioned in the TF hierarchy.
+- TF frames are polled at 30 Hz and visualized as RGB axis arrows (0.5 m length).
+- The optional `leveling_rpy_deg` parameter applies a static rotation at the `world/leveled` entity — useful for leveling the scene for visualization without affecting actual ROS transforms.
+- Requires the `rerun-sdk` Python package: `pip install rerun-sdk`
+
+---
+
 ## Inter-Node Data Flow
 
 ```
@@ -249,6 +288,26 @@ Full pipeline including segmentation.
 | `static_transform_publisher` | Publishes `body` → `camera_link` TF |
 | RViz2 | Visualization |
 
+### `test_fusion_rerun.launch.py`
+
+Same as `test_fusion.launch.py` but replaces RViz with the Rerun bridge for visualization.
+
+| Component | Description |
+|-----------|-------------|
+| `ros2 bag play` | Replays the bag with `--clock` |
+| FAST-LIO | Runs `mapping.launch.py` with `use_sim_time:=true` |
+| `sync_test_image_publisher` | Replays images (for sync validation) |
+| `sync_node` | Synchronizes (for sync validation) |
+| `fusion_yaml_node` | Segments point clouds using YAML bboxes |
+| `static_transform_publisher` | Publishes `body` → `camera_link` TF |
+| `rerun_bridge_node` | Logs ROS 2 data to Rerun viewer |
+
+**Launch arguments:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `leveling_rpy_deg` | `[0.0, 20.0, 0.0]` | Visualization-only leveling rotation (roll, pitch, yaw in degrees) |
+
 **Static TF (body → camera_link):**
 
 The `static_transform_publisher` with parent=`body`, child=`camera_link` publishes **T_{camera→body}** (the inverse of T_{body→camera}).
@@ -326,10 +385,16 @@ source install/setup.bash
 ros2 launch inspection_grounding test_sync.launch.py
 ```
 
-### Run — Full fusion test
+### Run — Full fusion test (RViz)
 
 ```bash
 ros2 launch inspection_grounding test_fusion.launch.py
+```
+
+### Run — Full fusion test (Rerun)
+
+```bash
+ros2 launch inspection_grounding test_fusion_rerun.launch.py
 ```
 
 ### Verify outputs

@@ -20,7 +20,6 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   DEPENDENCIES std_msgs sensor_msgs
 )
 
-# 3. Install Python nodes
 #    - sync_node:              synchronizes camera images with LiDAR point clouds
 #    - sync_test_image_publisher: replays images from a directory for testing
 #    - fusion_yaml_node:       segments LiDAR points using 2D bbox YAMLs and publishes results
@@ -28,6 +27,7 @@ install(PROGRAMS
   src/sync_node.py
   src/sync_test_image_publisher.py
   src/fusion_yaml_node.py
+  src/rerun_bridge_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
