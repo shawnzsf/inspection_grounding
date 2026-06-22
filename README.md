@@ -180,6 +180,7 @@ PointCloud2 msg
 | Sub | `/Laser_map` | `sensor_msgs/PointCloud2` | RELIABLE, KEEP_LAST(5) |
 | Sub | `/pointcloud/segmented_yaml` | `sensor_msgs/PointCloud2` | RELIABLE, KEEP_LAST(5) |
 | Sub | `/pointcloud/segmented_yaml_aggregated` | `sensor_msgs/PointCloud2` | RELIABLE, KEEP_LAST(5) |
+| Sub | `/camera/image_undistorted` | `sensor_msgs/Image` | default (KEEP_LAST 10) |
 | TF | `camera_init` → `body` | `geometry_msgs/TransformStamped` | via tf2 |
 | TF | `body` → `camera_link` | `geometry_msgs/TransformStamped` | via tf2 |
 
@@ -188,6 +189,12 @@ PointCloud2 msg
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `leveling_rpy_deg` | `[0.0, 0.0, 0.0]` | Optional roll/pitch/yaw (degrees) for visualization-only leveling rotation |
+| `camera_fx` | `597.384` | Camera focal length x (pixels) — for pinhole projection |
+| `camera_fy` | `597.443` | Camera focal length y (pixels) |
+| `camera_cx` | `774.861` | Camera principal point x (pixels) |
+| `camera_cy` | `1013.173` | Camera principal point y (pixels) |
+| `image_width` | `1520` | Image width in pixels |
+| `image_height` | `2016` | Image height in pixels |
 
 **Visualization details:**
 
@@ -198,11 +205,15 @@ PointCloud2 msg
 | `world/leveled/camera_init/segmented_yaml_aggregated` | Accumulated segmented points | Yellow |
 | `world/leveled/camera_init/axes` | `camera_init` frame axes | RGB (X=red, Y=green, Z=blue) |
 | `world/leveled/camera_init/body/axes` | `body` frame axes | RGB |
+| `world/leveled/camera_init/body/camera_link` | Pinhole camera model (static) | — |
 | `world/leveled/camera_init/body/camera_link/axes` | `camera_link` frame axes | RGB |
+| `world/leveled/camera_init/body/camera_link/image` | `/camera/image_undistorted` | Original image colors |
 
 - All point clouds are logged under `camera_init/` so they're correctly positioned in the TF hierarchy.
 - TF frames are polled at 30 Hz and visualized as RGB axis arrows (0.5 m length).
 - The optional `leveling_rpy_deg` parameter applies a static rotation at the `world/leveled` entity — useful for leveling the scene for visualization without affecting actual ROS transforms.
+- A **pinhole camera model** (`rr.Pinhole`) is logged at the `camera_link` entity using the camera intrinsics. This projects the 2D image into the 3D scene as a virtual camera frustum, allowing you to see where the camera is looking and how the image aligns with the point clouds. The camera uses `RDF` convention (X=Right, Y=Down, Z=Forward) matching the standard optical frame. The pinhole model is **dynamically re-logged** if the actual image dimensions differ from the parameter defaults — intrinsics are scaled proportionally to match the incoming image resolution.
+- The **camera image** is logged under the pinhole entity, so Rerun displays it both as a 2D image and projected into the 3D frustum. Supported encodings: `bgr8`, `rgb8`, `bgra8`, `rgba8`, `mono8`, `mono16`.
 - Requires the `rerun-sdk` Python package: `pip install rerun-sdk`
 
 ---
@@ -210,10 +221,10 @@ PointCloud2 msg
 ## Inter-Node Data Flow
 
 ```
-┌─────────────┐
-│  ROS 2 Bag  │  (sqlite3, --clock)
-│  /livox/lidar, /livox/imu
-└──────┬──────┘
+┌───────────────────────────────────┐
+│  ROS 2 Bag (sqlite3, --clock)     │
+│  /livox/lidar, /livox/imu         │
+└──────┬────────────────────────────┘
        │
        ▼
 ┌─────────────┐         ┌──────────────────────────┐
@@ -307,6 +318,12 @@ Same as `test_fusion.launch.py` but replaces RViz with the Rerun bridge for visu
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `leveling_rpy_deg` | `[0.0, 20.0, 0.0]` | Visualization-only leveling rotation (roll, pitch, yaw in degrees) |
+| `camera_fx` | `597.384` | Camera focal length x (pixels) |
+| `camera_fy` | `597.443` | Camera focal length y (pixels) |
+| `camera_cx` | `774.861` | Camera principal point x (pixels) |
+| `camera_cy` | `1013.173` | Camera principal point y (pixels) |
+| `image_width` | `1520` | Image width in pixels |
+| `image_height` | `2016` | Image height in pixels |
 
 **Static TF (body → camera_link):**
 

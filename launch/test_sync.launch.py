@@ -7,7 +7,7 @@ from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
     # 1. Play the ROS 2 bag with simulated clock
-    bag_path = "/home/robot/fastlio_ws/rosbags/2026-06-11_16-50-08/data/bag/bag.db3"
+    bag_path = "/home/robot/fastlio_ws/rosbags/2026-06-22_17-IWLG/data/bag/bag.db3"
     bag_play = ExecuteProcess(
         cmd=['ros2', 'bag', 'play', '-s', 'sqlite3', bag_path, '--clock'],
         output='screen'

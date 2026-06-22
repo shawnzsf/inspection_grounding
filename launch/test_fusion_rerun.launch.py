@@ -17,6 +17,23 @@ def generate_launch_description():
                     'Does not affect actual ROS transforms or calculations.'
     )
 
+    # Camera intrinsics for the Rerun pinhole projector.
+    # Defaults match the half-resolution images (1520x2016) published by
+    # sync_test_image_publisher.py, with intrinsics scaled by 0.5 from
+    # the original calibration.json values.
+    fx_arg = DeclareLaunchArgument('camera_fx', default_value='597.3843593065015',
+                                   description='Camera focal length x (pixels)')
+    fy_arg = DeclareLaunchArgument('camera_fy', default_value='597.4426138023167',
+                                   description='Camera focal length y (pixels)')
+    cx_arg = DeclareLaunchArgument('camera_cx', default_value='774.8614840838852',
+                                   description='Camera principal point x (pixels)')
+    cy_arg = DeclareLaunchArgument('camera_cy', default_value='1013.172720601387',
+                                   description='Camera principal point y (pixels)')
+    width_arg = DeclareLaunchArgument('image_width', default_value='1520',
+                                      description='Image width in pixels')
+    height_arg = DeclareLaunchArgument('image_height', default_value='2016',
+                                       description='Image height in pixels')
+
     # 1. Play the ROS 2 bag with simulated clock
     bag_path = "/home/robot/fastlio_ws/rosbags/2026-06-11_16-50-08/data/bag/bag.db3"
     bag_play = ExecuteProcess(
@@ -75,6 +92,12 @@ def generate_launch_description():
         parameters=[{
             'use_sim_time': True,
             'leveling_rpy_deg': LaunchConfiguration('leveling_rpy_deg'),
+            'camera_fx': LaunchConfiguration('camera_fx'),
+            'camera_fy': LaunchConfiguration('camera_fy'),
+            'camera_cx': LaunchConfiguration('camera_cx'),
+            'camera_cy': LaunchConfiguration('camera_cy'),
+            'image_width': LaunchConfiguration('image_width'),
+            'image_height': LaunchConfiguration('image_height'),
         }]
     )
 
@@ -107,6 +130,12 @@ def generate_launch_description():
 
     return LaunchDescription([
         leveling_arg,
+        fx_arg,
+        fy_arg,
+        cx_arg,
+        cy_arg,
+        width_arg,
+        height_arg,
         bag_play,
         fastlio_launch,
         mock_image_pub,

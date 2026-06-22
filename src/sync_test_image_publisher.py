@@ -13,7 +13,7 @@ class SyncTestImagePublisher(Node):
         super().__init__('sync_test_image_publisher')
         
         # Path to your pre-undistorted images
-        self.image_dir = Path("/home/robot/fastlio_ws/data/2026-06-11-HKUMTR/camera/right")
+        self.image_dir = Path("/home/robot/fastlio_ws/data/2026-06-22-IWLG/camera/right")
         self.image_files = sorted(list(self.image_dir.glob("*.png")) + list(self.image_dir.glob("*.jpg")))
         self.current_image_idx = 0
         
