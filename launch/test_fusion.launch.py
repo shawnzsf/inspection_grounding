@@ -21,25 +21,19 @@ def generate_launch_description():
         launch_arguments={'use_sim_time': 'true'}.items()
     )
     
-    # 3. Mock Image Publisher (syncs undistorted images to LiDAR timestamps)
-    mock_image_pub = Node(
-        package='inspection_grounding',
-        executable='sync_test_image_publisher.py',
-        name='sync_test_image_publisher',
-        output='screen',
-        parameters=[{'use_sim_time': True}]
-    )
-    
-    # 4. The Sync Node (to verify it receives both)
+    # 3. The Sync Node (directly loads images from disk and pairs with LiDAR by timestamp)
     sync_node = Node(
         package='inspection_grounding',
         executable='sync_node.py',
         name='sync_node',
         output='screen',
-        parameters=[{'use_sim_time': True}]
+        parameters=[{
+            'use_sim_time': True,
+            'image_dir': '/home/robot/fastlio_ws/data/2026-06-11-HKUMTR/camera/right'
+        }]
     )
     
-    # 5. The YAML Fusion Node (NEW)
+    # 4. The YAML Fusion Node (NEW)
     # Subscribes to /cloud_registered, checks for matching YAML, outputs colored PC and TF
     yaml_fusion_node = Node(
         package='inspection_grounding',
@@ -55,7 +49,7 @@ def generate_launch_description():
         }]
     )
     
-    # 6. RViz2 for visualization
+    # 5. RViz2 for visualization
     rviz_node = Node(
         package='rviz2',
         executable='rviz2',
@@ -94,7 +88,6 @@ def generate_launch_description():
     return LaunchDescription([
         bag_play,
         fastlio_launch,
-        mock_image_pub,
         sync_node,
         yaml_fusion_node,
         static_tf_lidar_to_cam,

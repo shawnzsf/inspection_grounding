@@ -18,8 +18,8 @@ def generate_launch_description():
     )
 
     # Camera intrinsics for the Rerun pinhole projector.
-    # Defaults match the half-resolution images (1520x2016) published by
-    # sync_test_image_publisher.py, with intrinsics scaled by 0.5 from
+    # Defaults match the half-resolution images (1520x2016) loaded by
+    # sync_node.py, with intrinsics scaled by 0.5 from
     # the original calibration.json values.
     fx_arg = DeclareLaunchArgument('camera_fx', default_value='597.3843593065015',
                                    description='Camera focal length x (pixels)')
@@ -49,25 +49,19 @@ def generate_launch_description():
         launch_arguments={'use_sim_time': 'true'}.items()
     )
 
-    # 3. Mock Image Publisher (syncs undistorted images to LiDAR timestamps)
-    mock_image_pub = Node(
-        package='inspection_grounding',
-        executable='sync_test_image_publisher.py',
-        name='sync_test_image_publisher',
-        output='screen',
-        parameters=[{'use_sim_time': True}]
-    )
-
-    # 4. The Sync Node (to verify it receives both)
+    # 3. The Sync Node (directly loads images from disk and pairs with LiDAR by timestamp)
     sync_node = Node(
         package='inspection_grounding',
         executable='sync_node.py',
         name='sync_node',
         output='screen',
-        parameters=[{'use_sim_time': True}]
+        parameters=[{
+            'use_sim_time': True,
+            'image_dir': '/home/robot/fastlio_ws/data/2026-06-11-HKUMTR/camera/right'
+        }]
     )
 
-    # 5. The YAML Fusion Node
+    # 4. The YAML Fusion Node
     # Subscribes to /cloud_registered, checks for matching YAML, outputs colored PC and TF
     yaml_fusion_node = Node(
         package='inspection_grounding',
@@ -83,7 +77,7 @@ def generate_launch_description():
         }]
     )
 
-    # 6. Rerun Bridge for visualization (replaces RViz2)
+    # 5. Rerun Bridge for visualization (replaces RViz2)
     rerun_bridge = Node(
         package='inspection_grounding',
         executable='rerun_bridge_node.py',
@@ -138,7 +132,6 @@ def generate_launch_description():
         height_arg,
         bag_play,
         fastlio_launch,
-        mock_image_pub,
         sync_node,
         yaml_fusion_node,
         static_tf_lidar_to_cam,

@@ -6,7 +6,7 @@ Subscribes to:
   - /Laser_map                              (sensor_msgs/PointCloud2, camera_init frame)
   - /pointcloud/segmented_yaml              (sensor_msgs/PointCloud2, camera_init frame)
   - /pointcloud/segmented_yaml_aggregated   (sensor_msgs/PointCloud2, camera_init frame)
-  - /camera/image_undistorted               (sensor_msgs/Image, camera_link frame)
+  - /synced_image                           (sensor_msgs/Image, camera_link frame)
   - TF: camera_init -> body, body -> camera_link
 
 Logs everything to a Rerun viewer for 3D visualization.
@@ -115,9 +115,10 @@ class RerunBridgeNode(Node):
             PointCloud2, '/pointcloud/segmented_yaml_aggregated',
             self.aggregated_callback, reliable_qos
         )
-        # Image subscriber (default QoS — matches sync_test_image_publisher)
+        # Image subscriber — listens to the standalone image topic published
+        # by sync_node.py (timestamp-matched to LiDAR data)
         self.sub_image = self.create_subscription(
-            Image, '/camera/image_undistorted', self.image_callback, 10
+            Image, '/synced_image', self.image_callback, 10
         )
 
         # Timer for TF polling (30 Hz)
