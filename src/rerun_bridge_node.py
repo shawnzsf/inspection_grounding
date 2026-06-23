@@ -84,10 +84,10 @@ class RerunBridgeNode(Node):
         # Defaults match the half-resolution images (1520x2016) published by
         # sync_test_image_publisher.py, with intrinsics scaled by 0.5 from
         # the original calibration.json values.
-        self.fx = self.declare_parameter('camera_fx', 597.3843593065015).value
-        self.fy = self.declare_parameter('camera_fy', 597.4426138023167).value
-        self.cx = self.declare_parameter('camera_cx', 774.8614840838852).value
-        self.cy = self.declare_parameter('camera_cy', 1013.172720601387).value
+        self.fx = self.declare_parameter('fx', 597.3843593065015).value
+        self.fy = self.declare_parameter('fy', 597.4426138023167).value
+        self.cx = self.declare_parameter('cx', 774.8614840838852).value
+        self.cy = self.declare_parameter('cy', 1013.172720601387).value
         self.img_width = self.declare_parameter('image_width', 1520).value
         self.img_height = self.declare_parameter('image_height', 2016).value
 
@@ -343,9 +343,6 @@ class RerunBridgeNode(Node):
           - body:        camera_init -> body (published by FAST-LIO)
           - camera_link: body -> camera_link (static transform)
         """
-        now = self.get_clock().now()
-        rr.set_time("ros_time", timestamp=now.nanoseconds / 1e9)
-
         # camera_init: root frame — log an axis gizmo at the origin
         rr.log(f"{self.base_path}/camera_init", rr.Transform3D())
         self._log_axes(f"{self.base_path}/camera_init")
@@ -355,6 +352,7 @@ class RerunBridgeNode(Node):
             tf = self.tf_buffer.lookup_transform(
                 'camera_init', 'body', rclpy.time.Time()
             )
+            rr.set_time("ros_time", timestamp=self._stamp_to_ns(tf.header.stamp) / 1e9)
             t = tf.transform.translation
             q = tf.transform.rotation
             rr.log(

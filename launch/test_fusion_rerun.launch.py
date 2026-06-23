@@ -1,41 +1,27 @@
 import os
+import yaml
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess, IncludeLaunchDescription, DeclareLaunchArgument
+from launch.actions import ExecuteProcess, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
 
 def generate_launch_description():
-    # Optional visualization-only leveling rotation (roll, pitch, yaw in degrees).
-    # Usage: ros2 launch inspection_grounding test_fusion_rerun.launch.py leveling_rpy_deg:="[10.0, 0.0, 0.0]"
-    leveling_arg = DeclareLaunchArgument(
-        'leveling_rpy_deg',
-        default_value='[0.0, 20.0, 0.0]',
-        description='Visualization-only leveling rotation [roll, pitch, yaw] in degrees. '
-                    'Does not affect actual ROS transforms or calculations.'
-    )
+    pkg_share = get_package_share_directory('inspection_grounding')
 
-    # Camera intrinsics for the Rerun pinhole projector.
-    # Defaults match the half-resolution images (1520x2016) loaded by
-    # sync_node.py, with intrinsics scaled by 0.5 from
-    # the original calibration.json values.
-    fx_arg = DeclareLaunchArgument('camera_fx', default_value='597.3843593065015',
-                                   description='Camera focal length x (pixels)')
-    fy_arg = DeclareLaunchArgument('camera_fy', default_value='597.4426138023167',
-                                   description='Camera focal length y (pixels)')
-    cx_arg = DeclareLaunchArgument('camera_cx', default_value='774.8614840838852',
-                                   description='Camera principal point x (pixels)')
-    cy_arg = DeclareLaunchArgument('camera_cy', default_value='1013.172720601387',
-                                   description='Camera principal point y (pixels)')
-    width_arg = DeclareLaunchArgument('image_width', default_value='1520',
-                                      description='Image width in pixels')
-    height_arg = DeclareLaunchArgument('image_height', default_value='2016',
-                                       description='Image height in pixels')
+    # Launch-level config (bag path, static TF) — read directly by launch
+    launch_cfg_path = os.path.join(pkg_share, 'config', 'launch_config.yaml')
+    with open(launch_cfg_path, 'r') as f:
+        launch_cfg = yaml.safe_load(f)
+
+    bag_path = launch_cfg['bag_path']
+    tf_cfg = launch_cfg['static_tf_body_to_camera']
+
+    # ROS 2 node parameters — passed to nodes via --params-file
+    params_path = os.path.join(pkg_share, 'config', 'params.yaml')
 
     # 1. Play the ROS 2 bag with simulated clock
-    bag_path = "/home/robot/fastlio_ws/rosbags/2026-06-11_16-50-08/data/bag/bag.db3"
     bag_play = ExecuteProcess(
         cmd=['ros2', 'bag', 'play', '-s', 'sqlite3', bag_path, '--clock'],
         output='screen'
@@ -55,10 +41,7 @@ def generate_launch_description():
         executable='sync_node.py',
         name='sync_node',
         output='screen',
-        parameters=[{
-            'use_sim_time': True,
-            'image_dir': '/home/robot/fastlio_ws/data/2026-06-11-HKUMTR/camera/right'
-        }]
+        parameters=[params_path]
     )
 
     # 4. The YAML Fusion Node
@@ -68,13 +51,7 @@ def generate_launch_description():
         executable='fusion_yaml_node.py',
         name='fusion_yaml_node',
         output='screen',
-        parameters=[{
-            'yaml_dir': '/home/robot/fastlio_ws/masks/Ground_Truth_20',
-            'output_dir': '/home/robot/fastlio_ws/legacy_outputs',
-            'target_frame': 'camera_init',
-            'camera_frame': 'camera_link',
-            'use_sim_time': True
-        }]
+        parameters=[params_path]
     )
 
     # 5. Rerun Bridge for visualization (replaces RViz2)
@@ -83,16 +60,7 @@ def generate_launch_description():
         executable='rerun_bridge_node.py',
         name='rerun_bridge',
         output='screen',
-        parameters=[{
-            'use_sim_time': True,
-            'leveling_rpy_deg': LaunchConfiguration('leveling_rpy_deg'),
-            'camera_fx': LaunchConfiguration('camera_fx'),
-            'camera_fy': LaunchConfiguration('camera_fy'),
-            'camera_cx': LaunchConfiguration('camera_cx'),
-            'camera_cy': LaunchConfiguration('camera_cy'),
-            'image_width': LaunchConfiguration('image_width'),
-            'image_height': LaunchConfiguration('image_height'),
-        }]
+        parameters=[params_path]
     )
 
     # Static TF: body (IMU) → camera_link
@@ -114,22 +82,15 @@ def generate_launch_description():
         executable='static_transform_publisher',
         name='static_tf_body_to_cam',
         arguments=[
-            '0.02810730', '-0.01283486', '-0.11198965',  # Translation (x, y, z)
-            '0.04167539', '-0.64984191', '0.71063765', '-0.26638843',  # Rotation (qx, qy, qz, qw)
-            'body',
-            'camera_link'
+            *[str(v) for v in tf_cfg['translation']],
+            *[str(v) for v in tf_cfg['rotation_xyzw']],
+            tf_cfg['parent_frame'],
+            tf_cfg['child_frame']
         ],
         parameters=[{'use_sim_time': True}]
     )
 
     return LaunchDescription([
-        leveling_arg,
-        fx_arg,
-        fy_arg,
-        cx_arg,
-        cy_arg,
-        width_arg,
-        height_arg,
         bag_play,
         fastlio_launch,
         sync_node,

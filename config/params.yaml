@@ -1,0 +1,65 @@
+# =============================================================================
+# inspection_grounding — ROS 2 Node Parameters
+# =============================================================================
+# This file is passed to nodes via --params-file.  It contains ONLY node
+# parameter sections (each with a ros__parameters key).
+#
+# Launch-level configuration (bag path, static TF) lives in launch_config.yaml.
+#
+# Camera intrinsics below are for the right camera, undistorted, scaled to
+# half-resolution (1520×2016).  Source: calibration.json × 0.5.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Sync Node — pairs camera images with LiDAR point clouds by timestamp
+# ---------------------------------------------------------------------------
+sync_node:
+  ros__parameters:
+    use_sim_time: true
+    image_dir: /home/robot/fastlio_ws/data/2026-06-22-IWLG/camera/right
+    camera_frame_id: camera_link
+    # Undistorted intrinsics (right camera, 1520×2016 half-res)
+    fx: 597.3843593065015
+    fy: 597.4426138023167
+    cx: 774.8614840838852
+    cy: 1013.172720601387
+
+# ---------------------------------------------------------------------------
+# Fusion YAML Node — segments LiDAR points using 2D bbox YAMLs
+# ---------------------------------------------------------------------------
+fusion_yaml_node:
+  ros__parameters:
+    use_sim_time: true
+    yaml_dir: /home/robot/fastlio_ws/masks/Ground_Truth_20
+    output_dir: /home/robot/fastlio_ws/legacy_outputs
+    target_frame: camera_init
+    camera_frame: camera_link
+    # Scale factor for bbox coordinates if annotation resolution differs
+    # from the camera intrinsics resolution.  Set to 1.0 when they match.
+    bbox_scale: 1.0
+    # Bbox visualization depth in camera frame (metres)
+    bbox_vis_depth: 2.0
+    # Tolerance for matching YAML files to LiDAR timestamps (nanoseconds)
+    yaml_match_tolerance_ns: 150000000   # 150 ms
+    # Undistorted intrinsics (right camera, 1520×2016 half-res)
+    fx: 597.3843593065015
+    fy: 597.4426138023167
+    cx: 774.8614840838852
+    cy: 1013.172720601387
+
+# ---------------------------------------------------------------------------
+# Rerun Bridge Node — visualizes ROS 2 topics in Rerun
+# ---------------------------------------------------------------------------
+rerun_bridge:
+  ros__parameters:
+    use_sim_time: true
+    # Optional visualization-only leveling rotation [roll, pitch, yaw] in degrees.
+    # Does not affect actual ROS transforms or calculations.
+    leveling_rpy_deg: [0.0, 20.0, 0.0]
+    # Undistorted intrinsics (right camera, 1520×2016 half-res)
+    fx: 597.3843593065015
+    fy: 597.4426138023167
+    cx: 774.8614840838852
+    cy: 1013.172720601387
+    image_width: 1520
+    image_height: 2016

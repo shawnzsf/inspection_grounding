@@ -53,12 +53,25 @@ class FusionYamlNode(Node):
         # Scale factor for bbox coordinates if annotation resolution differs
         # from the camera intrinsics resolution. Set to 1.0 when they match.
         self.declare_parameter('bbox_scale', 1.0)
+        # Bbox visualization depth in camera frame (metres)
+        self.declare_parameter('bbox_vis_depth', 2.0)
+        # Tolerance for matching YAML files to LiDAR timestamps (nanoseconds)
+        self.declare_parameter('yaml_match_tolerance_ns', 150000000)
+        # Undistorted intrinsics (right camera, 1520×2016 half-res)
+        self.declare_parameter('fx', 597.3843593065015)
+        self.declare_parameter('fy', 597.4426138023167)
+        self.declare_parameter('cx', 774.8614840838852)
+        self.declare_parameter('cy', 1013.172720601387)
 
         self.yaml_dir = Path(self.get_parameter('yaml_dir').value)
         self.output_dir = Path(self.get_parameter('output_dir').value)
         self.target_frame = self.get_parameter('target_frame').value
         self.camera_frame = self.get_parameter('camera_frame').value
         self.bbox_scale = float(self.get_parameter('bbox_scale').value)
+        self.bbox_vis_depth = float(self.get_parameter('bbox_vis_depth').value)
+        self.yaml_match_tolerance_ns = int(
+            self.get_parameter('yaml_match_tolerance_ns').value
+        )
 
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -66,13 +79,10 @@ class FusionYamlNode(Node):
         # Calibration is for 3040x4032, but actual images are 1520x2016 (half-res).
         # The undistort script scales intrinsics by 0.5, so we use the scaled values
         # to match the actual image/bbox coordinate space.
-        self.fx = 597.3843593065015    # 1194.768718613003 * 0.5
-        self.fy = 597.4426138023167    # 1194.8852276046334 * 0.5
-        self.cx = 774.8614840838852    # 1549.7229681677704 * 0.5
-        self.cy = 1013.172720601387    # 2026.345441202774 * 0.5
-
-        # Bbox visualization depth in camera frame
-        self.bbox_vis_depth = 2.0
+        self.fx = float(self.get_parameter('fx').value)
+        self.fy = float(self.get_parameter('fy').value)
+        self.cx = float(self.get_parameter('cx').value)
+        self.cy = float(self.get_parameter('cy').value)
 
         # TF
         self.tf_buffer = tf2_ros.Buffer()
@@ -434,7 +444,7 @@ class FusionYamlNode(Node):
             return
 
         nearest_path, nearest_ns = min(candidates, key=lambda x: abs(x[1] - stamp_ns))
-        if abs(nearest_ns - stamp_ns) > 150_000_000:  # 150 ms tolerance
+        if abs(nearest_ns - stamp_ns) > self.yaml_match_tolerance_ns:
             return
 
         filename = nearest_path.name
