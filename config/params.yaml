@@ -63,3 +63,6 @@ rerun_bridge:
     cy: 1013.172720601387
     image_width: 1520
     image_height: 2016
+    # Enable depth image visualization (projects /cloud_registered_body
+    # into the camera plane and logs a rr.DepthImage to Rerun)
+    enable_depth: true

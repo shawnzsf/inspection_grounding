@@ -175,10 +175,10 @@ class SyncNode(Node):
             synced_msg.pointcloud = pc_msg
 
             time_diff_ms = abs(lidar_ns - img_ns) / 1_000_000
-            self.get_logger().info(
-                f"Synced: lidar_ns={lidar_ns}, img_ns={img_ns}, "
-                f"diff={time_diff_ms:.1f}ms, file={img_path.name}"
-            )
+            # self.get_logger().info(
+            #     f"Synced: lidar_ns={lidar_ns}, img_ns={img_ns}, "
+            #     f"diff={time_diff_ms:.1f}ms, file={img_path.name}"
+            # )
             self.pub_synced.publish(synced_msg)
             self.pub_image.publish(img_msg)
 

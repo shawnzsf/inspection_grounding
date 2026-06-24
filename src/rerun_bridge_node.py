@@ -7,11 +7,17 @@ Subscribes to:
   - /pointcloud/segmented_yaml              (sensor_msgs/PointCloud2, camera_init frame)
   - /pointcloud/segmented_yaml_aggregated   (sensor_msgs/PointCloud2, camera_init frame)
   - /synced_image                           (sensor_msgs/Image, camera_link frame)
+  - /cloud_registered_body                  (sensor_msgs/PointCloud2, body frame)
   - TF: camera_init -> body, body -> camera_link
 
 Logs everything to a Rerun viewer for 3D visualization.
 A pinhole camera model is logged at the camera_link entity so that the
 2D image is correctly projected into the 3D scene.
+
+The /cloud_registered_body topic (per-frame LiDAR in the body frame) is
+projected into the camera image plane to produce a depth image, which is
+logged as a rr.DepthImage under the camera_link pinhole entity.  Rerun
+back-projects this depth image into the 3D scene as a colored point cloud.
 
 Requires: pip install rerun-sdk
 """
@@ -91,6 +97,9 @@ class RerunBridgeNode(Node):
         self.img_width = self.declare_parameter('image_width', 1520).value
         self.img_height = self.declare_parameter('image_height', 2016).value
 
+        # Enable / disable the depth image visualization
+        self.enable_depth = self.declare_parameter('enable_depth', True).value
+
         # Track actual image dimensions from received images
         self._actual_img_w = self.img_width
         self._actual_img_h = self.img_height
@@ -119,6 +128,19 @@ class RerunBridgeNode(Node):
         # by sync_node.py (timestamp-matched to LiDAR data)
         self.sub_image = self.create_subscription(
             Image, '/synced_image', self.image_callback, 10
+        )
+
+        # Per-frame LiDAR in body frame — used to compute the depth image
+        # by projecting points into the camera plane.  BEST_EFFORT matches
+        # FAST-LIO's /cloud_registered_body publisher.
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=5,
+        )
+        self.sub_cloud_body = self.create_subscription(
+            PointCloud2, '/cloud_registered_body',
+            self.cloud_body_callback, sensor_qos
         )
 
         # Timer for TF polling (30 Hz)
@@ -254,6 +276,124 @@ class RerunBridgeNode(Node):
         else:
             return RerunBridgeNode._extract_xyz(msg), None
 
+    @staticmethod
+    def _quat_to_rotmat(q):
+        """Convert a ROS Quaternion (x, y, z, w) to a 3×3 rotation matrix."""
+        x, y, z, w = q.x, q.y, q.z, q.w
+        return np.array([
+            [1 - 2*y*y - 2*z*z,     2*x*y - 2*z*w,     2*x*z + 2*y*w],
+            [    2*x*y + 2*z*w, 1 - 2*x*x - 2*z*z,     2*y*z - 2*x*w],
+            [    2*x*z - 2*y*w,     2*y*z + 2*x*w, 1 - 2*x*x - 2*y*y],
+        ], dtype=np.float64)
+
+    def _lookup_transform_matrix(self, target_frame, source_frame, stamp):
+        """Look up a TF transform and return it as a 4×4 homogeneous matrix.
+
+        Args:
+            target_frame: destination frame
+            source_frame: source frame
+            stamp: ROS timestamp (builtin_interfaces/Time)
+
+        Returns:
+            (4, 4) numpy array, or None if the transform is unavailable.
+        """
+        try:
+            tf_msg = self.tf_buffer.lookup_transform(
+                target_frame, source_frame,
+                rclpy.time.Time.from_msg(stamp),
+                timeout=rclpy.duration.Duration(seconds=0.1),
+            )
+        except (tf2_ros.LookupException, tf2_ros.ExtrapolationException,
+                tf2_ros.ConnectivityException):
+            return None
+
+        t = tf_msg.transform.translation
+        q = tf_msg.transform.rotation
+        T = np.eye(4, dtype=np.float64)
+        T[:3, :3] = self._quat_to_rotmat(q)
+        T[:3, 3] = [t.x, t.y, t.z]
+        return T
+
+    @staticmethod
+    def _transform_points(points_xyz, T):
+        """Transform (N, 3) points using a 4×4 homogeneous matrix."""
+        if points_xyz.size == 0:
+            return points_xyz
+        ones = np.ones((points_xyz.shape[0], 1), dtype=np.float64)
+        pts_h = np.hstack((points_xyz.astype(np.float64), ones))
+        return (T @ pts_h.T).T[:, :3]
+
+    def _project_to_depth_image(self, pts_cam, width, height):
+        """Project camera-frame points to a 2D depth image (H, W) float32.
+
+        For each point with z > 0 that falls inside the image bounds, the
+        corresponding pixel is set to the point's depth (z).  When multiple
+        points map to the same pixel, the nearest (smallest z) is kept.
+
+        Args:
+            pts_cam: (N, 3) points in the camera optical frame (RDF)
+            width: image width in pixels
+            height: image height in pixels
+
+        Returns:
+            (height, width) float32 array, 0 where no point projected.
+        """
+        depth_img = np.zeros((height, width), dtype=np.float32)
+        if pts_cam.shape[0] == 0:
+            return depth_img
+
+        # Scale intrinsics to match the actual image dimensions, mirroring
+        # the logic in _get_pinhole().  The stored fx/fy/cx/cy are for the
+        # parameter-default resolution (img_width × img_height); if the
+        # actual image is larger (e.g. full-res 3040×4032 vs half-res
+        # 1520×2016), the intrinsics must be scaled proportionally so that
+        # projection and Rerun's back-projection stay consistent.
+        scale_x = width / self.img_width if self.img_width > 0 else 1.0
+        scale_y = height / self.img_height if self.img_height > 0 else 1.0
+        fx = self.fx * scale_x
+        fy = self.fy * scale_y
+        cx = self.cx * scale_x
+        cy = self.cy * scale_y
+
+        z = pts_cam[:, 2]
+        valid = z > 1e-6
+        if not np.any(valid):
+            return depth_img
+
+        x = pts_cam[valid, 0]
+        y = pts_cam[valid, 1]
+        z = z[valid]
+
+        u = fx * (x / z) + cx
+        v = fy * (y / z) + cy
+
+        in_bounds = (u >= 0) & (u < width) & (v >= 0) & (v < height)
+        if not np.any(in_bounds):
+            return depth_img
+
+        u = u[in_bounds]
+        v = v[in_bounds]
+        z = z[in_bounds]
+
+        # Round to nearest pixel and clip to valid range [0, dim-1] to
+        # guard against round() pushing a value just under width/height
+        # up to exactly width/height (out of bounds).
+        u_idx = np.clip(np.round(u).astype(np.int64), 0, width - 1)
+        v_idx = np.clip(np.round(v).astype(np.int64), 0, height - 1)
+
+        # Keep the nearest depth when multiple points hit the same pixel:
+        # sort by depth ascending, then scatter (first write wins).
+        order = np.argsort(z)
+        u_idx = u_idx[order]
+        v_idx = v_idx[order]
+        z_sorted = z[order].astype(np.float32)
+
+        # Only write to pixels that are still zero (uninitialised)
+        mask = depth_img[v_idx, u_idx] == 0.0
+        depth_img[v_idx[mask], u_idx[mask]] = z_sorted[mask]
+
+        return depth_img
+
     # ------------------------------------------------------------------
     # Point cloud callbacks
     # ------------------------------------------------------------------
@@ -299,6 +439,57 @@ class RerunBridgeNode(Node):
         rr.log(f"{self.base_path}/camera_init/segmented_yaml_aggregated", rr.Points3D(
             xyz, colors=[255, 255, 0, 255]
         ))
+
+    # ------------------------------------------------------------------
+    # Per-frame LiDAR → depth image callback
+    # ------------------------------------------------------------------
+
+    def cloud_body_callback(self, msg):
+        """Project /cloud_registered_body into the camera and log a depth image.
+
+        The LiDAR points (in the body frame) are transformed to the camera
+        optical frame via TF, then projected to the image plane.  The
+        resulting depth image is logged as a rr.DepthImage under the
+        camera_link pinhole entity, so Rerun back-projects it into 3D.
+        """
+        if not self.enable_depth:
+            return
+
+        xyz = self._extract_xyz(msg)
+        if xyz.shape[0] == 0:
+            return
+
+        stamp = msg.header.stamp
+        source_frame = msg.header.frame_id or 'body'
+
+        # body → camera_link
+        T_cam_body = self._lookup_transform_matrix(
+            'camera_link', source_frame, stamp
+        )
+        if T_cam_body is None:
+            return
+
+        pts_cam = self._transform_points(xyz, T_cam_body)
+        depth_img = self._project_to_depth_image(
+            pts_cam, self._actual_img_w, self._actual_img_h
+        )
+
+        if not np.any(depth_img > 0):
+            return
+
+        self._set_time(stamp)
+        rr.log(
+            f"{self.base_path}/camera_init/body/camera_link/depth",
+            rr.DepthImage(
+                depth_img,
+                meter=1.0,
+                colormap="viridis",
+                depth_range=[
+                    float(depth_img[depth_img > 0].min()),
+                    float(depth_img[depth_img > 0].max()),
+                ],
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Image callback
