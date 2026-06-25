@@ -7,7 +7,7 @@
 # Launch-level configuration (bag path, static TF) lives in launch_config.yaml.
 #
 # Camera intrinsics:
-# - fusion_yaml_node: left camera, undistorted, full-res (3040×4032)
+# - fusion_node: left camera, undistorted, full-res (3040×4032)
 # - rerun_bridge:     right camera, undistorted, half-res (1520×2016)
 # Source: calibration.json
 # =============================================================================
@@ -33,7 +33,7 @@ sync_node:
 # ---------------------------------------------------------------------------
 # Fusion YAML Node — segments LiDAR points using 2D bbox YAMLs
 # ---------------------------------------------------------------------------
-fusion_yaml_node:
+fusion_node:
   ros__parameters:
     use_sim_time: true
     yaml_dir: /home/robot/fastlio_ws/masks/Ground_Truth_20
@@ -58,6 +58,9 @@ fusion_yaml_node:
     cy: 1983.9367884159963
     image_width: 3040
     image_height: 4032
+    # Inspection database (per-observation + per-track aggregation)
+    enable_db: true
+    db_path: /home/robot/fastlio_ws/inspection.db
 
 # ---------------------------------------------------------------------------
 # Rerun Bridge Node — visualizes ROS 2 topics in Rerun

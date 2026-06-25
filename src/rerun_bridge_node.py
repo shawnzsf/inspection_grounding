@@ -88,7 +88,7 @@ class RerunBridgeNode(Node):
 
         # Camera intrinsics for pinhole projection.
         # Defaults match the half-resolution images (1520x2016) published by
-        # sync_test_image_publisher.py, with intrinsics scaled by 0.5 from
+        # , with intrinsics scaled by 0.5 from
         # the original calibration.json values.
         self.fx = self.declare_parameter('fx', 597.3843593065015).value
         self.fy = self.declare_parameter('fy', 597.4426138023167).value
@@ -104,7 +104,7 @@ class RerunBridgeNode(Node):
         self._actual_img_w = self.img_width
         self._actual_img_h = self.img_height
 
-        # QoS: reliable to match FAST-LIO and fusion_yaml_node publishers
+        # QoS: reliable to match FAST-LIO and fusion_node publishers
         reliable_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,

@@ -48,8 +48,8 @@ def generate_launch_description():
     # Subscribes to /cloud_registered, checks for matching YAML, outputs colored PC and TF
     yaml_fusion_node = Node(
         package='inspection_grounding',
-        executable='fusion_yaml_node.py',
-        name='fusion_yaml_node',
+        executable='fusion_node.py',
+        name='fusion_node',
         output='screen',
         parameters=[params_path]
     )
