@@ -24,7 +24,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header
-from visualization_msgs.msg import Marker
+from inspection_grounding.msg import SyncedSensorData
 import tf2_ros
 import yaml
 
@@ -57,11 +57,14 @@ class FusionYamlNode(Node):
         self.declare_parameter('bbox_vis_depth', 2.0)
         # Tolerance for matching YAML files to LiDAR timestamps (nanoseconds)
         self.declare_parameter('yaml_match_tolerance_ns', 150000000)
-        # Undistorted intrinsics (right camera, 1520×2016 half-res)
+        # Undistorted intrinsics (right camera, default 1520×2016 half-res)
         self.declare_parameter('fx', 597.3843593065015)
         self.declare_parameter('fy', 597.4426138023167)
         self.declare_parameter('cx', 774.8614840838852)
         self.declare_parameter('cy', 1013.172720601387)
+        # Set image width to calculate scaling factor for projection        
+        self.img_width = self.declare_parameter('image_width', 1520).value
+        self.img_height = self.declare_parameter('image_height', 2016).value
 
         self.yaml_dir = Path(self.get_parameter('yaml_dir').value)
         self.output_dir = Path(self.get_parameter('output_dir').value)
@@ -69,16 +72,11 @@ class FusionYamlNode(Node):
         self.camera_frame = self.get_parameter('camera_frame').value
         self.bbox_scale = float(self.get_parameter('bbox_scale').value)
         self.bbox_vis_depth = float(self.get_parameter('bbox_vis_depth').value)
-        self.yaml_match_tolerance_ns = int(
-            self.get_parameter('yaml_match_tolerance_ns').value
-        )
+        self.yaml_match_tolerance_ns = int(self.get_parameter('yaml_match_tolerance_ns').value)
 
         os.makedirs(self.output_dir, exist_ok=True)
 
         # Camera intrinsics (undistorted, right camera)
-        # Calibration is for 3040x4032, but actual images are 1520x2016 (half-res).
-        # The undistort script scales intrinsics by 0.5, so we use the scaled values
-        # to match the actual image/bbox coordinate space.
         self.fx = float(self.get_parameter('fx').value)
         self.fy = float(self.get_parameter('fy').value)
         self.cx = float(self.get_parameter('cx').value)
@@ -96,41 +94,20 @@ class FusionYamlNode(Node):
             durability=DurabilityPolicy.VOLATILE
         )
 
-        self.pub_pc = self.create_publisher(
-            PointCloud2, '/pointcloud/segmented_yaml', reliable_qos
-        )
-        self.pub_pc_aggregated = self.create_publisher(
-            PointCloud2, '/pointcloud/segmented_yaml_aggregated', reliable_qos
-        )
-        self.pub_pose = self.create_publisher(
-            PoseStamped, '/object/global_pose', reliable_qos
-        )
-        # Marker publisher needs higher depth for frames with many bboxes
-        marker_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=200,
-            durability=DurabilityPolicy.VOLATILE
-        )
-        self.pub_bbox = self.create_publisher(
-            Marker, '/bbox_marker', marker_qos
-        )
+        self.pub_pc = self.create_publisher(PointCloud2, '/pointcloud/segmented_yaml', reliable_qos)
+        self.pub_pc_aggregated = self.create_publisher(PointCloud2, '/pointcloud/segmented_yaml_aggregated', reliable_qos)
+        self.pub_pose = self.create_publisher(PoseStamped, '/object/global_pose', reliable_qos)
 
         # Subscribers
-        sensor_qos = QoSProfile(
+        syncMsg_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
             depth=10
         )
-        self.sub_pc = self.create_subscription(
-            PointCloud2, '/cloud_registered_body', self.pc_callback, sensor_qos
-        )
+        self.sub_pc = self.create_subscription(SyncedSensorData, '/synced_sensor_data', self.syncMsg_callback, syncMsg_qos)
 
         # Cache for republishing (ensures RViz receives data even with single-shot triggers)
         self.last_pc_msg = None
-        self.last_pose = None
-        self.last_bboxes = []
-        self.last_centroid = None
         self.last_stamp = None
 
         # Accumulated points across all frames (in target/global frame)
@@ -305,154 +282,32 @@ class FusionYamlNode(Node):
                 f.write(f"{x:.6f} {y:.6f} {z:.6f}\n")
         return True
 
-    # Color palette for multiple bboxes (RGB)
-    _BBOX_COLORS = [
-        (1.0, 0.2, 0.2),   # red
-        (0.2, 1.0, 0.2),   # green
-        (0.2, 0.4, 1.0),   # blue
-        (1.0, 1.0, 0.2),   # yellow
-        (1.0, 0.5, 0.0),   # orange
-        (0.8, 0.2, 1.0),   # purple
-        (0.2, 1.0, 1.0),   # cyan
-        (1.0, 0.2, 0.8),   # magenta
-    ]
-
-    def _publish_bbox_marker(self, bbox, stamp, T_target_cam, idx=0):
-        """Publish 2D bbox as 3D frustum lines in RViz (in world frame).
-
-        The bbox corners are computed in camera frame at a fixed depth, then
-        transformed to the world (target) frame so they stay fixed in space
-        instead of moving with the camera.
-
-        Args:
-            bbox: (x_min, y_min, x_max, y_max) tuple
-            stamp: ROS timestamp
-            T_target_cam: 4x4 transform from camera frame to target (world) frame
-            idx: color index (cycles through palette)
-        """
-        x_min, y_min, x_max, y_max = bbox
-
-        def px_to_cam_xyz(u, v):
-            """Unproject pixel to 3D point in camera frame at visualization depth."""
-            x = (u - self.cx) * self.bbox_vis_depth / self.fx
-            y = (v - self.cy) * self.bbox_vis_depth / self.fy
-            return np.array([x, y, self.bbox_vis_depth], dtype=np.float64)
-
-        # Bbox corners in camera frame
-        corners_cam = np.array([
-            px_to_cam_xyz(x_min, y_min),
-            px_to_cam_xyz(x_max, y_min),
-            px_to_cam_xyz(x_max, y_max),
-            px_to_cam_xyz(x_min, y_max),
-        ])
-        origin_cam = np.array([[0.0, 0.0, 0.0]], dtype=np.float64)
-
-        # Transform to world frame
-        corners_world = self._transform_points(corners_cam, T_target_cam)
-        origin_world = self._transform_points(origin_cam, T_target_cam)[0]
-
-        def to_point(p):
-            return Point(x=float(p[0]), y=float(p[1]), z=float(p[2]))
-
-        p1 = to_point(corners_world[0])
-        p2 = to_point(corners_world[1])
-        p3 = to_point(corners_world[2])
-        p4 = to_point(corners_world[3])
-        origin = to_point(origin_world)
-
-        r, g, b = self._BBOX_COLORS[idx % len(self._BBOX_COLORS)]
-
-        marker = Marker()
-        marker.header.stamp = stamp
-        marker.header.frame_id = self.target_frame
-        marker.ns = 'bbox'
-        marker.id = self._marker_id_counter
-        self._marker_id_counter += 1
-        marker.type = Marker.LINE_LIST
-        marker.action = Marker.ADD
-        marker.scale.x = 0.03
-        marker.color.r = r
-        marker.color.g = g
-        marker.color.b = b
-        marker.color.a = 1.0
-
-        # Rectangle edges
-        marker.points.extend([p1, p2, p2, p3, p3, p4, p4, p1])
-        # Rays from camera origin to corners
-        marker.points.extend([origin, p1, origin, p2, origin, p3, origin, p4])
-
-        self.pub_bbox.publish(marker)
-
-    def _delete_bbox_markers(self, stamp, count):
-        """Delete stale bbox markers to prevent leftover visuals in RViz.
-
-        Args:
-            stamp: ROS timestamp
-            count: number of markers to delete (IDs 0..count-1)
-        """
-        for i in range(count):
-            marker = Marker()
-            marker.header.stamp = stamp
-            marker.header.frame_id = self.camera_frame
-            marker.ns = 'bbox'
-            marker.id = i
-            marker.action = Marker.DELETE
-            self.pub_bbox.publish(marker)
-
-    def _publish_centroid_marker(self, centroid, stamp):
-        """Publish the centroid as a marker in RViz."""
-        marker = Marker()
-        marker.header.stamp = stamp
-        marker.header.frame_id = self.target_frame
-        marker.ns = 'centroid'
-        marker.id = self._marker_id_counter
-        self._marker_id_counter += 1
-        marker.type = Marker.SPHERE
-        marker.action = Marker.ADD
-        marker.pose.position.x = centroid[0]
-        marker.pose.position.y = centroid[1]
-        marker.pose.position.z = centroid[2]
-        marker.scale.x = 0.1  # Size of the sphere
-        marker.scale.y = 0.1
-        marker.scale.z = 0.1
-        marker.color.r = 0.0
-        marker.color.g = 1.0
-        marker.color.b = 0.0
-        marker.color.a = 1.0
-
-        self.pub_bbox.publish(marker)  # Reusing bbox publisher for centroid marker
-
-    def pc_callback(self, msg):
+    def syncMsg_callback(self, msg):
         """Main callback: match YAML, project, segment, publish."""
         stamp = msg.header.stamp
+        # Convert message timestamp to nanosecond
         stamp_ns = int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
 
-        if not self.yaml_dir.exists():
-            return
+        if not self.yaml_dir.exists(): return
 
-        # Find nearest YAML by timestamp
-        candidates = []
+        # Find YAML by exact timestamp match (SyncMessage timestamp is using the image timestamp)
+        yaml_path = None
         for p in self.yaml_dir.iterdir():
             if not p.is_file() or p.suffix.lower() not in ('.yaml', '.yml'):
                 continue
             try:
-                candidates.append((p, int(p.stem)))
+                if int(p.stem) == stamp_ns:
+                    yaml_path = p
+                    break
             except ValueError:
                 continue
 
-        if not candidates:
-            return
-
-        nearest_path, nearest_ns = min(candidates, key=lambda x: abs(x[1] - stamp_ns))
-        if abs(nearest_ns - stamp_ns) > self.yaml_match_tolerance_ns:
-            return
-
-        filename = nearest_path.name
+        if yaml_path is None: return
+        filename = yaml_path.name
 
         # Load YAML
-        try:
-            with open(nearest_path, 'r') as f:
-                data = yaml.safe_load(f)
+        try: 
+            with open(yaml_path, 'r') as f: data = yaml.safe_load(f)
         except Exception as e:
             self.get_logger().error(f"Failed to read {filename}: {e}")
             return
@@ -467,14 +322,11 @@ class FusionYamlNode(Node):
         try:
             # Read cloud
             pts_src = self._read_cloud_xyz(msg)
-            if pts_src.shape[0] == 0:
-                return
+            if pts_src.shape[0] == 0: return
 
             # Project to camera frame
             source_frame = msg.header.frame_id
-            T_cam_src = self._lookup_transform_matrix(
-                self.camera_frame, source_frame, stamp
-            )
+            T_cam_src = self._lookup_transform_matrix(self.camera_frame, source_frame, stamp)
             pts_cam = self._transform_points(pts_src, T_cam_src)
 
             # Project to image plane
@@ -504,42 +356,16 @@ class FusionYamlNode(Node):
                     f"(per-bbox counts: {counts})"
                 )
                 return
-
-            # Publish bbox markers in world frame (accumulate with unique IDs)
-            # Only publish once per YAML to avoid duplicate markers
-            is_new_yaml = (filename != self._last_yaml_name)
-            if is_new_yaml:
-                try:
-                    T_target_cam = self._lookup_transform_matrix(
-                        self.target_frame, self.camera_frame, stamp
-                    )
-                    for i, bbox in enumerate(bboxes):
-                        self._publish_bbox_marker(bbox, stamp, T_target_cam, idx=i)
-                except Exception as e:
-                    self.get_logger().warn(f"Failed to publish bbox markers: {e}")
-
-            # Publish centroid marker for RViz visualization
-            centroid_src = segmented_pts.mean(axis=0)
-            # Transform to target frame for publishing
+            
             if source_frame != self.target_frame:
                 T_target_src = self._lookup_transform_matrix(
                     self.target_frame, source_frame, stamp
                 )
                 segmented_pts_pub = self._transform_points(segmented_pts, T_target_src)
                 pub_frame = self.target_frame
-                centroid_pub = self._transform_points(centroid_src.reshape(1, 3), T_target_src)[0]
             else:
                 segmented_pts_pub = segmented_pts
                 pub_frame = source_frame
-                centroid_pub = centroid_src
-
-            # Publish object centroid pose
-            pose = PoseStamped(header=Header(stamp=stamp, frame_id=self.target_frame))
-            pose.pose.position.x = float(centroid_pub[0])
-            pose.pose.position.y = float(centroid_pub[1])
-            pose.pose.position.z = float(centroid_pub[2])
-            pose.pose.orientation.w = 1.0
-            self.pub_pose.publish(pose)
 
             # Publish segmented PointCloud2 for visualization
             pc_msg = None
@@ -573,27 +399,20 @@ class FusionYamlNode(Node):
                     f"Failed to publish aggregated PointCloud2: {e}"
                 )
 
-            # Publish centroid marker (only for new YAML to avoid duplicates)
-            if is_new_yaml:
-                self._publish_centroid_marker(centroid_pub, stamp)
-
             # Cache results for republishing (only if pc_msg was successfully created)
             if pc_msg is not None:
                 self.last_pc_msg = pc_msg
-            self.last_pose = pose
-            self.last_bboxes = bboxes
-            self.last_centroid = centroid_pub
             self.last_stamp = stamp
             self._last_yaml_name = filename
 
             # Save combined PCD (union of all bboxes)
-            pcd_path = self.output_dir / f"{nearest_path.stem}_segmented.pcd"
+            pcd_path = self.output_dir / f"{yaml_path.stem}_segmented.pcd"
             self._save_pcd(segmented_pts, pcd_path)
 
             # Save per-bbox PCDs
             for i, bbox_pts in enumerate(per_bbox_pts):
                 if bbox_pts.shape[0] > 0:
-                    bbox_pcd_path = self.output_dir / f"{nearest_path.stem}_bbox{i}_segmented.pcd"
+                    bbox_pcd_path = self.output_dir / f"{yaml_path.stem}_bbox{i}_segmented.pcd"
                     self._save_pcd(bbox_pts, bbox_pcd_path)
 
             # Log
@@ -618,8 +437,6 @@ class FusionYamlNode(Node):
         """
         if self.last_pc_msg is not None:
             self.pub_pc.publish(self.last_pc_msg)
-        if self.last_pose is not None:
-            self.pub_pose.publish(self.last_pose)
         if self.last_aggregated_msg is not None:
             self.pub_pc_aggregated.publish(self.last_aggregated_msg)
 

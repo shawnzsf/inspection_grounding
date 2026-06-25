@@ -44,9 +44,7 @@ class SyncNode(Node):
         cy = self.get_parameter('cy').value
 
         # --- Build sorted image timestamp list ---
-        self.image_files = sorted(
-            list(image_dir.glob("*.png")) + list(image_dir.glob("*.jpg"))
-        )
+        self.image_files = sorted(list(image_dir.glob("*.png")) + list(image_dir.glob("*.jpg")))
         if not self.image_files:
             self.get_logger().error(f"No images found in {image_dir}")
             raise RuntimeError("No images found")
@@ -87,14 +85,14 @@ class SyncNode(Node):
         )
         self.sub_pc = self.create_subscription(
             PointCloud2,
-            '/cloud_registered',
+            '/cloud_registered_body',
             self.lidar_callback,
             lidar_qos
         )
 
         # --- Publishers ---
         self.pub_synced = self.create_publisher(SyncedSensorData, '/synced_sensor_data', 10)
-        # Also publish the image as a standalone topic for RViz visualization
+        # Also publish the image as a standalone topic for visualization
         self.pub_image = self.create_publisher(Image, '/synced_image', 10)
 
         self.get_logger().info("Sync Node initialized. Waiting for LiDAR data...")
@@ -174,7 +172,7 @@ class SyncNode(Node):
             synced_msg.camera_info = self.camera_info
             synced_msg.pointcloud = pc_msg
 
-            time_diff_ms = abs(lidar_ns - img_ns) / 1_000_000
+            # time_diff_ms = abs(lidar_ns - img_ns) / 1_000_000
             # self.get_logger().info(
             #     f"Synced: lidar_ns={lidar_ns}, img_ns={img_ns}, "
             #     f"diff={time_diff_ms:.1f}ms, file={img_path.name}"
