@@ -12,7 +12,7 @@ bag_path: /home/robot/fastlio_ws/rosbags/2026-06-22_17-IWLG/data/bag/bag.db3
 # Static TF: body (IMU) → camera_link
 # Publishes T_{camera→body}: parent=body, child=camera_link
 #
-# From calibration.json (right camera):
+# From calibration.json (left camera):
 #   R_lidar_camera (3×3) and t_lidar_camera (lidar origin in camera frame)
 # From FAST-LIO mid360.yaml (IMU extrinsic):
 #   R_body_lidar = I,  t_body_lidar = [0.011, 0.02329, -0.04412]
@@ -21,10 +21,10 @@ bag_path: /home/robot/fastlio_ws/rosbags/2026-06-22_17-IWLG/data/bag/bag.db3
 # T_{camera→body} = inv(T_{body→camera}):
 #   R = R_lidar_camera^T
 #   t = t_body_lidar - R_lidar_camera^T * t_lidar_camera
-#     = [0.02810730, -0.01283486, -0.11198965]
+#     = [0.03159816, 0.06295154, -0.11131637]
 # Quaternion from R_lidar_camera^T
 static_tf_body_to_camera:
-  translation: [0.02810730, -0.01283486, -0.11198965]       # x, y, z (metres)
-  rotation_xyzw: [0.04167539, -0.64984191, 0.71063765, -0.26638843]  # qx, qy, qz, qw
+  translation: [0.03159816, 0.06295154, -0.11131637]       # x, y, z (metres)
+  rotation_xyzw: [-0.65290271, 0.04396615, -0.27557732, 0.70416061]  # qx, qy, qz, qw
   parent_frame: body
   child_frame: camera_link

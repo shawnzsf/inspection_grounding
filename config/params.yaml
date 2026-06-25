@@ -6,8 +6,10 @@
 #
 # Launch-level configuration (bag path, static TF) lives in launch_config.yaml.
 #
-# Camera intrinsics below are for the right camera, undistorted, scaled to
-# half-resolution (1520×2016).  Source: calibration.json × 0.5.
+# Camera intrinsics:
+# - fusion_yaml_node: left camera, undistorted, full-res (3040×4032)
+# - rerun_bridge:     right camera, undistorted, half-res (1520×2016)
+# Source: calibration.json
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -16,13 +18,17 @@
 sync_node:
   ros__parameters:
     use_sim_time: true
-    image_dir: /home/robot/fastlio_ws/data/2026-06-22-IWLG/camera/right
+    image_dir: /home/robot/fastlio_ws/data/2026-06-22-IWLG/frames
     camera_frame_id: camera_link
-    # Undistorted intrinsics (right camera, 1520×2016 half-res)
-    fx: 597.3843593065015
-    fy: 597.4426138023167
-    cx: 774.8614840838852
-    cy: 1013.172720601387
+    # Undistorted intrinsics (left camera, 3040×4032 full-res)
+    # fx: 597.3843593065015
+    # fy: 597.4426138023167
+    # cx: 774.8614840838852
+    # cy: 1013.172720601387
+    fx: 1190.4990185909498
+    fy: 1190.344769418459
+    cx: 1545.2154064008814
+    cy: 1983.9367884159963
 
 # ---------------------------------------------------------------------------
 # Fusion YAML Node — segments LiDAR points using 2D bbox YAMLs
@@ -31,21 +37,27 @@ fusion_yaml_node:
   ros__parameters:
     use_sim_time: true
     yaml_dir: /home/robot/fastlio_ws/masks/Ground_Truth_20
-    output_dir: /home/robot/fastlio_ws/legacy_outputs
+    output_dir: /home/robot/fastlio_ws/pcd_outputs
     target_frame: camera_init
     camera_frame: camera_link
     # Scale factor for bbox coordinates if annotation resolution differs
     # from the camera intrinsics resolution.  Set to 1.0 when they match.
     bbox_scale: 1.0
+    # Annotation mode: 'bbox' (per-timestamp YAML files) or 'mask' (COCO JSON)
+    annotation_mode: mask
+    # Path to COCO-format segmentation JSON (used when annotation_mode='mask')
+    mask_json_path: /home/robot/fastlio_ws/masks/2026-6-22-IWLG/sam3_tracking_segmentation.json
     # Bbox visualization depth in camera frame (metres)
     bbox_vis_depth: 2.0
     # Tolerance for matching YAML files to LiDAR timestamps (nanoseconds)
-    yaml_match_tolerance_ns: 150000000   # 150 ms
-    # Undistorted intrinsics (right camera, 1520×2016 half-res)
-    fx: 597.3843593065015
-    fy: 597.4426138023167
-    cx: 774.8614840838852
-    cy: 1013.172720601387
+    yaml_match_tolerance_ns: 100000000   # 100 ms
+    # Undistorted intrinsics (left camera, 3040×4032 half-res)
+    fx: 1190.4990185909498
+    fy: 1190.344769418459
+    cx: 1545.2154064008814
+    cy: 1983.9367884159963
+    image_width: 3040
+    image_height: 4032
 
 # ---------------------------------------------------------------------------
 # Rerun Bridge Node — visualizes ROS 2 topics in Rerun

@@ -12,6 +12,7 @@ This node:
 7. Visualizes bbox in RViz
 """
 
+import json
 import os
 from pathlib import Path
 
@@ -53,30 +54,52 @@ class FusionYamlNode(Node):
         # Scale factor for bbox coordinates if annotation resolution differs
         # from the camera intrinsics resolution. Set to 1.0 when they match.
         self.declare_parameter('bbox_scale', 1.0)
+        # Annotation mode: 'bbox' (per-timestamp YAML files) or 'mask' (COCO JSON)
+        self.declare_parameter('annotation_mode', 'mask')
+        # Path to COCO-format segmentation JSON (used when annotation_mode='mask')
+        self.declare_parameter('mask_json_path', '/home/robot/fastlio_ws/sam3_tracking_segmentation.json')
         # Bbox visualization depth in camera frame (metres)
         self.declare_parameter('bbox_vis_depth', 2.0)
         # Tolerance for matching YAML files to LiDAR timestamps (nanoseconds)
         self.declare_parameter('yaml_match_tolerance_ns', 150000000)
-        # Undistorted intrinsics (right camera, default 1520×2016 half-res)
-        self.declare_parameter('fx', 597.3843593065015)
-        self.declare_parameter('fy', 597.4426138023167)
-        self.declare_parameter('cx', 774.8614840838852)
-        self.declare_parameter('cy', 1013.172720601387)
-        # Set image width to calculate scaling factor for projection        
-        self.img_width = self.declare_parameter('image_width', 1520).value
-        self.img_height = self.declare_parameter('image_height', 2016).value
+        # Undistorted intrinsics (left camera, default 3040×4032 full-res)
+        self.declare_parameter('fx', 1190.4990185909498)
+        self.declare_parameter('fy', 1190.344769418459)
+        self.declare_parameter('cx', 1545.2154064008814)
+        self.declare_parameter('cy', 1983.9367884159963)
+        # Set image width to calculate scaling factor for projection
+        self.img_width = self.declare_parameter('image_width', 3040).value
+        self.img_height = self.declare_parameter('image_height', 4032).value
 
         self.yaml_dir = Path(self.get_parameter('yaml_dir').value)
         self.output_dir = Path(self.get_parameter('output_dir').value)
         self.target_frame = self.get_parameter('target_frame').value
         self.camera_frame = self.get_parameter('camera_frame').value
         self.bbox_scale = float(self.get_parameter('bbox_scale').value)
+        self.annotation_mode = str(self.get_parameter('annotation_mode').value).lower()
+        self.mask_json_path = str(self.get_parameter('mask_json_path').value)
         self.bbox_vis_depth = float(self.get_parameter('bbox_vis_depth').value)
         self.yaml_match_tolerance_ns = int(self.get_parameter('yaml_match_tolerance_ns').value)
 
+        # Pre-load COCO JSON if in mask mode
+        self._mask_data = None
+        if self.annotation_mode == 'mask':
+            try:
+                with open(self.mask_json_path, 'r') as f:
+                    self._mask_data = json.load(f)
+                self.get_logger().info(
+                    f"Loaded mask JSON: {self.mask_json_path} "
+                    f"({len(self._mask_data.get('images', []))} images, "
+                    f"{len(self._mask_data.get('annotations', []))} annotations)"
+                )
+            except Exception as e:
+                self.get_logger().error(
+                    f"Failed to load mask JSON '{self.mask_json_path}': {e}"
+                )
+
         os.makedirs(self.output_dir, exist_ok=True)
 
-        # Camera intrinsics (undistorted, right camera)
+        # Camera intrinsics (undistorted, left camera)
         self.fx = float(self.get_parameter('fx').value)
         self.fy = float(self.get_parameter('fy').value)
         self.cx = float(self.get_parameter('cx').value)
@@ -126,6 +149,10 @@ class FusionYamlNode(Node):
             f"camera={self.camera_frame}"
         )
 
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
     def _parse_bboxes(self, data):
         """Extract all bounding boxes from YAML data dict.
 
@@ -172,6 +199,137 @@ class FusionYamlNode(Node):
                     pass
 
         return bboxes
+
+    def _get_scale_factors(self, stored_width, stored_height):
+        """Compute scale factors between stored dimensions and intrinsics resolution.
+
+        Mirrors the scaling logic in rerun_bridge_node._get_pinhole():
+            scale_x = stored_width  / self.img_width
+            scale_y = stored_height / self.img_height
+
+        To convert annotation coordinates (at stored resolution) to the
+        intrinsics resolution, divide by the returned scale factors.
+        To scale intrinsics up to the stored resolution, multiply by them.
+
+        Args:
+            stored_width:  width  of the annotation/image (e.g. 3040)
+            stored_height: height of the annotation/image (e.g. 4032)
+
+        Returns:
+            (scale_x, scale_y) tuple of floats.
+        """
+        scale_x = stored_width / self.img_width if self.img_width > 0 else 1.0
+        scale_y = stored_height / self.img_height if self.img_height > 0 else 1.0
+        return scale_x, scale_y
+
+    def _parse_mask(self, data, timestamp_ns):
+        """Parse segmentation masks from COCO-format JSON for a given timestamp.
+
+        Expects a COCO-format dict with 'images', 'annotations', and
+        'categories' keys (as produced by SAM3 tracking export).
+
+        The image is matched by exact timestamp: the stem of the image's
+        'file_name' (e.g. "1782119257554358000.jpg") must equal str(timestamp_ns).
+
+        Annotation coordinates (polygon vertices and bbox) are returned in
+        their original stored image resolution.  The caller should pass the
+        same stored dimensions to _project_to_image() so that projected
+        points are in the same coordinate space.
+
+        Args:
+            data: COCO-format dict (parsed JSON)
+            timestamp_ns: integer nanosecond timestamp to match
+
+        Returns:
+            List of dicts, one per annotation, each containing:
+              - 'polygons': list of (N, 2) float64 numpy arrays (unscaled)
+              - 'bbox': (x_min, y_min, x_max, y_max) tuple (unscaled)
+              - 'track_id': int or None
+              - 'category': str or None
+              - 'mask_path': str or None (relative path)
+              - 'image_width': int, stored image width (for projection scaling)
+              - 'image_height': int, stored image height (for projection scaling)
+            Empty list if no matching image or no annotations.
+        """
+        if not isinstance(data, dict):
+            return []
+
+        images = data.get('images', [])
+        annotations = data.get('annotations', [])
+        categories = data.get('categories', [])
+
+        # Build category lookup
+        categories_by_id = {
+            cat['id']: cat.get('name')
+            for cat in categories if isinstance(cat, dict) and 'id' in cat
+        }
+
+        # Find the image whose file_name stem matches timestamp_ns exactly
+        target_stem = str(timestamp_ns)
+        image_info = None
+        for img in images:
+            if not isinstance(img, dict):
+                continue
+            file_name = img.get('file_name', '')
+            if Path(file_name).stem == target_stem:
+                image_info = img
+                break
+
+        if image_info is None:
+            return []
+
+        image_id = image_info.get('id')
+        if image_id is None:
+            return []
+
+        stored_w = image_info.get('width', self.img_width)
+        stored_h = image_info.get('height', self.img_height)
+
+        # Collect annotations for this image
+        results = []
+        for ann in annotations:
+            if not isinstance(ann, dict) or ann.get('image_id') != image_id:
+                continue
+
+            # Parse segmentation polygons (kept at original stored resolution)
+            polygons = []
+            seg = ann.get('segmentation')
+            if isinstance(seg, list):
+                for poly in seg:
+                    if isinstance(poly, list) and len(poly) >= 6:  # at least 3 points
+                        arr = np.array(poly, dtype=np.float64).reshape(-1, 2)
+                        polygons.append(arr)
+
+            # Parse bbox (COCO format: [x, y, w, h] → [x_min, y_min, x_max, y_max])
+            bbox = None
+            coco_bbox = ann.get('bbox')
+            if isinstance(coco_bbox, list) and len(coco_bbox) == 4:
+                try:
+                    x, y, w, h = coco_bbox
+                    bbox = (
+                        float(x),
+                        float(y),
+                        float(x + w),
+                        float(y + h),
+                    )
+                except (ValueError, TypeError):
+                    pass
+
+            # Skip annotations with no usable geometry
+            if not polygons and bbox is None:
+                continue
+
+            results.append({
+                'polygons': polygons,
+                'bbox': bbox,
+                'track_id': ann.get('track_id'),
+                'category': categories_by_id.get(ann.get('category_id')),
+                'mask_path': ann.get('mask_path'),
+                'image_width': stored_w,
+                'image_height': stored_h,
+            })
+
+        return results
 
     def _lookup_transform_matrix(self, target_frame, source_frame, stamp):
         """
@@ -231,26 +389,80 @@ class FusionYamlNode(Node):
         )
         return pts.reshape(0, 3) if pts.size == 0 else pts
 
-    def _project_to_image(self, pts_cam):
+    def _project_to_image(self, pts_cam, stored_width=None, stored_height=None):
         """
         Project 3D points (in camera frame) to 2D image plane.
-        
+
+        If stored_width and stored_height are provided, the intrinsics are
+        scaled from the default resolution (self.img_width × self.img_height)
+        to the stored resolution using _get_scale_factors(), so that the
+        projected (u, v) coordinates are in the same coordinate space as
+        annotations stored at that resolution.
+
         Args:
             pts_cam: (N, 3) points in camera frame
-            
+            stored_width:  width  of the annotation/image resolution (optional)
+            stored_height: height of the annotation/image resolution (optional)
+
         Returns:
             u, v: image coordinates
             valid_z: mask of points with z > 0
         """
+        # Scale intrinsics to match the stored annotation resolution
+        if stored_width is not None and stored_height is not None:
+            scale_x, scale_y = self._get_scale_factors(stored_width, stored_height)
+            fx = self.fx * scale_x
+            fy = self.fy * scale_y
+            cx = self.cx * scale_x
+            cy = self.cy * scale_y
+        else:
+            fx = self.fx
+            fy = self.fy
+            cx = self.cx
+            cy = self.cy
+
         z = pts_cam[:, 2]
         valid = z > 1e-6
         u = np.full(pts_cam.shape[0], np.nan, dtype=np.float64)
         v = np.full(pts_cam.shape[0], np.nan, dtype=np.float64)
 
-        u[valid] = self.fx * (pts_cam[valid, 0] / z[valid]) + self.cx
-        v[valid] = self.fy * (pts_cam[valid, 1] / z[valid]) + self.cy
+        u[valid] = fx * (pts_cam[valid, 0] / z[valid]) + cx
+        v[valid] = fy * (pts_cam[valid, 1] / z[valid]) + cy
 
         return u, v, valid
+
+    @staticmethod
+    def _points_in_polygon(u, v, polygon):
+        """Vectorized point-in-polygon test (ray casting algorithm).
+
+        Args:
+            u: (N,) array of x-coordinates (image column)
+            v: (N,) array of y-coordinates (image row)
+            polygon: (M, 2) array of polygon vertices
+
+        Returns:
+            (N,) boolean array — True for points inside (or on edge of) polygon.
+        """
+        n = len(polygon)
+        if n < 3:
+            return np.zeros(len(u), dtype=bool)
+
+        inside = np.zeros(len(u), dtype=bool)
+        j = n - 1
+        for i in range(n):
+            xi, yi = polygon[i]
+            xj, yj = polygon[j]
+
+            # Check if edge crosses the horizontal ray from (u, v)
+            cond1 = (yi > v) != (yj > v)
+            # Compute x-coordinate of intersection
+            with np.errstate(divide='ignore', invalid='ignore'):
+                x_int = (xj - xi) * (v - yi) / (yj - yi) + xi
+            cond2 = u < x_int
+            inside ^= (cond1 & cond2)
+            j = i
+
+        return inside
 
     def _save_pcd(self, pts_xyz, out_path):
         """Save points as ASCII PCD file. Creates parent dirs. No-op if 0 points."""
@@ -283,80 +495,131 @@ class FusionYamlNode(Node):
         return True
 
     def syncMsg_callback(self, msg):
-        """Main callback: match YAML, project, segment, publish."""
+        """Main callback: match annotation, project, segment, publish.
+
+        Supports two annotation modes controlled by the 'annotation_mode' parameter:
+        - 'bbox': per-timestamp YAML files with bounding boxes
+        - 'mask': single COCO-format JSON with segmentation polygons
+        """
         stamp = msg.header.stamp
-        # Convert message timestamp to nanosecond
         stamp_ns = int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
 
-        if not self.yaml_dir.exists(): return
+        # ------------------------------------------------------------------
+        # Step 1: Load annotations based on mode
+        # ------------------------------------------------------------------
+        annotations = []       # unified list of annotation dicts
+        stored_w = None         # annotation image width (for projection scaling)
+        stored_h = None         # annotation image height
+        source_id = None        # identifier for logging (filename or timestamp)
 
-        # Find YAML by exact timestamp match (SyncMessage timestamp is using the image timestamp)
-        yaml_path = None
-        for p in self.yaml_dir.iterdir():
-            if not p.is_file() or p.suffix.lower() not in ('.yaml', '.yml'):
-                continue
+        if self.annotation_mode == 'mask':
+            if self._mask_data is None:
+                return
+            masks = self._parse_mask(self._mask_data, stamp_ns)
+            if not masks:
+                return
+            source_id = str(stamp_ns)
+            stored_w = masks[0]['image_width']
+            stored_h = masks[0]['image_height']
+            for m in masks:
+                annotations.append({
+                    'polygons': m['polygons'],
+                    'bbox': m['bbox'],
+                    'label': m.get('category') or f"track{m.get('track_id', '?')}",
+                })
+        else:
+            # bbox mode: find YAML by exact timestamp match
+            if not self.yaml_dir.exists():
+                return
+            yaml_path = None
+            for p in self.yaml_dir.iterdir():
+                if not p.is_file() or p.suffix.lower() not in ('.yaml', '.yml'):
+                    continue
+                try:
+                    if int(p.stem) == stamp_ns:
+                        yaml_path = p
+                        break
+                except ValueError:
+                    continue
+            if yaml_path is None:
+                return
+            source_id = yaml_path.name
             try:
-                if int(p.stem) == stamp_ns:
-                    yaml_path = p
-                    break
-            except ValueError:
-                continue
+                with open(yaml_path, 'r') as f:
+                    data = yaml.safe_load(f)
+            except Exception as e:
+                self.get_logger().error(f"Failed to read {source_id}: {e}")
+                return
+            bboxes = self._parse_bboxes(data)
+            bboxes = [b for b in bboxes if b[2] > b[0] and b[3] > b[1]]
+            if not bboxes:
+                self.get_logger().warn(f"No valid bboxes in {source_id}")
+                return
+            for i, bb in enumerate(bboxes):
+                annotations.append({
+                    'polygons': [],
+                    'bbox': bb,
+                    'label': f"bbox{i}",
+                })
 
-        if yaml_path is None: return
-        filename = yaml_path.name
-
-        # Load YAML
-        try: 
-            with open(yaml_path, 'r') as f: data = yaml.safe_load(f)
-        except Exception as e:
-            self.get_logger().error(f"Failed to read {filename}: {e}")
+        if not annotations:
             return
 
-        bboxes = self._parse_bboxes(data)
-        # Filter out invalid bboxes (zero or negative area)
-        bboxes = [b for b in bboxes if b[2] > b[0] and b[3] > b[1]]
-        if not bboxes:
-            self.get_logger().warn(f"No valid bboxes in {filename}")
-            return
-
+        # ------------------------------------------------------------------
+        # Step 2: Read cloud, transform, project
+        # ------------------------------------------------------------------
         try:
-            # Read cloud
-            pts_src = self._read_cloud_xyz(msg)
-            if pts_src.shape[0] == 0: return
+            pts_src = self._read_cloud_xyz(msg.pointcloud)
+            if pts_src.shape[0] == 0:
+                return
 
-            # Project to camera frame
-            source_frame = msg.header.frame_id
+            source_frame = msg.pointcloud.header.frame_id
             T_cam_src = self._lookup_transform_matrix(self.camera_frame, source_frame, stamp)
             pts_cam = self._transform_points(pts_src, T_cam_src)
 
-            # Project to image plane
-            u, v, valid_z = self._project_to_image(pts_cam)
+            # Project to image plane (scale intrinsics if stored dimensions known)
+            u, v, valid_z = self._project_to_image(pts_cam, stored_w, stored_h)
             valid_proj = valid_z & np.isfinite(u) & np.isfinite(v)
 
-            # Per-bbox segmentation: compute mask for each bbox individually
-            per_bbox_masks = []
-            per_bbox_pts = []
-            for i, (x_min, y_min, x_max, y_max) in enumerate(bboxes):
-                bbox_mask = valid_proj & (u >= x_min) & (u <= x_max) & (v >= y_min) & (v <= y_max)
-                bbox_pts = pts_src[bbox_mask]
-                per_bbox_masks.append(bbox_mask)
-                per_bbox_pts.append(bbox_pts)
+            # ------------------------------------------------------------------
+            # Step 3: Per-annotation segmentation
+            # ------------------------------------------------------------------
+            per_ann_masks = []
+            per_ann_pts = []
+            for ann in annotations:
+                if ann['polygons']:
+                    # Polygon-based segmentation (mask mode)
+                    ann_mask = np.zeros(pts_src.shape[0], dtype=bool)
+                    for poly in ann['polygons']:
+                        ann_mask |= valid_proj & self._points_in_polygon(u, v, poly)
+                elif ann['bbox'] is not None:
+                    # Bbox-based segmentation (bbox mode or mask fallback)
+                    x_min, y_min, x_max, y_max = ann['bbox']
+                    ann_mask = valid_proj & (u >= x_min) & (u <= x_max) & \
+                               (v >= y_min) & (v <= y_max)
+                else:
+                    ann_mask = np.zeros(pts_src.shape[0], dtype=bool)
 
-            # Union mask for combined visualization
-            mask = np.zeros(pts_src.shape[0], dtype=bool)
-            for m in per_bbox_masks:
-                mask |= m
+                per_ann_masks.append(ann_mask)
+                per_ann_pts.append(pts_src[ann_mask])
 
-            segmented_pts = pts_src[mask]
+            # Union mask for combined output
+            union_mask = np.zeros(pts_src.shape[0], dtype=bool)
+            for m in per_ann_masks:
+                union_mask |= m
+
+            segmented_pts = pts_src[union_mask]
             if segmented_pts.shape[0] == 0:
-                # Log per-bbox point counts for debugging
-                counts = [len(p) for p in per_bbox_pts]
+                counts = [len(p) for p in per_ann_pts]
                 self.get_logger().warn(
-                    f"No points in any bbox: {filename} "
-                    f"(per-bbox counts: {counts})"
+                    f"No points in any annotation: {source_id} "
+                    f"(per-ann counts: {counts})"
                 )
                 return
-            
+
+            # ------------------------------------------------------------------
+            # Step 4: Transform to target frame, publish, save
+            # ------------------------------------------------------------------
             if source_frame != self.target_frame:
                 T_target_src = self._lookup_transform_matrix(
                     self.target_frame, source_frame, stamp
@@ -367,7 +630,7 @@ class FusionYamlNode(Node):
                 segmented_pts_pub = segmented_pts
                 pub_frame = source_frame
 
-            # Publish segmented PointCloud2 for visualization
+            # Publish segmented PointCloud2
             pc_msg = None
             try:
                 pc_header = Header(stamp=stamp, frame_id=pub_frame)
@@ -377,7 +640,7 @@ class FusionYamlNode(Node):
             except Exception as e:
                 self.get_logger().warn(f"Failed to publish segmented PointCloud2: {e}")
 
-            # Accumulate segmented points (in target frame) and publish aggregated cloud
+            # Accumulate and publish aggregated cloud
             try:
                 if self.aggregated_pts is None:
                     self.aggregated_pts = segmented_pts_pub.copy()
@@ -399,28 +662,28 @@ class FusionYamlNode(Node):
                     f"Failed to publish aggregated PointCloud2: {e}"
                 )
 
-            # Cache results for republishing (only if pc_msg was successfully created)
+            # Cache for republishing
             if pc_msg is not None:
                 self.last_pc_msg = pc_msg
             self.last_stamp = stamp
-            self._last_yaml_name = filename
+            self._last_yaml_name = source_id
 
-            # Save combined PCD (union of all bboxes)
-            pcd_path = self.output_dir / f"{yaml_path.stem}_segmented.pcd"
+            # Save PCDs
+            stem = str(stamp_ns)
+            pcd_path = self.output_dir / f"{stem}_segmented.pcd"
             self._save_pcd(segmented_pts, pcd_path)
 
-            # Save per-bbox PCDs
-            for i, bbox_pts in enumerate(per_bbox_pts):
-                if bbox_pts.shape[0] > 0:
-                    bbox_pcd_path = self.output_dir / f"{yaml_path.stem}_bbox{i}_segmented.pcd"
-                    self._save_pcd(bbox_pts, bbox_pcd_path)
+            for i, ann_pts in enumerate(per_ann_pts):
+                if ann_pts.shape[0] > 0:
+                    ann_pcd_path = self.output_dir / f"{stem}_ann{i}_segmented.pcd"
+                    self._save_pcd(ann_pts, ann_pcd_path)
 
             # Log
             extent = segmented_pts.max(axis=0) - segmented_pts.min(axis=0)
-            per_bbox_counts = [p.shape[0] for p in per_bbox_pts]
+            per_ann_counts = [p.shape[0] for p in per_ann_pts]
             self.get_logger().info(
-                f"{filename}: {len(bboxes)} bbox(es), "
-                f"{segmented_pts.shape[0]} pts (per-bbox: {per_bbox_counts}), "
+                f"{source_id}: {len(annotations)} ann(s) [{self.annotation_mode}], "
+                f"{segmented_pts.shape[0]} pts (per-ann: {per_ann_counts}), "
                 f"extent [{extent[0]:.3f}, {extent[1]:.3f}, {extent[2]:.3f}]"
             )
 
