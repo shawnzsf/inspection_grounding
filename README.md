@@ -10,8 +10,8 @@ The package synchronizes camera images with LiDAR point clouds, projects 3D poin
 1. [Package Structure](#package-structure)
 2. [Nodes](#nodes)
    - [sync_node](#1-sync_nodepy)
-   - [fusion_node](#3-fusion_nodepy)
-   - [rerun_bridge_node](#4-rerun_bridge_nodepy)
+   - [fusion_node](#2-fusion_nodepy)
+   - [rerun_bridge_node](#3-rerun_bridge_nodepy)
 3. [Inspection Database](#inspection-database)
 4. [Inter-Node Data Flow](#inter-node-data-flow)
 5. [Custom Messages](#custom-messages)
@@ -32,7 +32,7 @@ src/inspection_grounding/
 │   └── SyncedSensorData.msg              # bundled image + camera_info + pointcloud
 ├── src/
 │   ├── sync_node.py                      # time-synchronizer node
-│   ├── fusion_node.py               # 2D-annotation → 3D pointcloud segmentation node
+│   ├── fusion_node.py                    # 2D-annotation → 3D pointcloud segmentation node
 │   ├── inspection_db.py                  # SQLite wrapper for per-object inspection data
 │   └── rerun_bridge_node.py              # ROS 2 → Rerun visualization bridge
 ├── config/
@@ -69,7 +69,7 @@ src/inspection_grounding/
 
 ---
 
-### 3. `fusion_node.py`
+### 2. `fusion_node.py`
 
 **Purpose** — The core fusion node. Matches each LiDAR scan with 2D annotations (bounding-box YAML files or COCO-format segmentation JSON) by timestamp, projects the 3D points onto the image plane, segments points inside the annotation region, publishes the result, and stores per-observation/per-track data in a SQLite database.
 
@@ -230,7 +230,7 @@ SyncedSensorData msg
 
 ---
 
-### 4. `rerun_bridge_node.py`
+### 3. `rerun_bridge_node.py`
 
 **Purpose** — Bridge node that subscribes to ROS 2 topics and logs them to a [Rerun](https://www.rerun.io/) viewer for 3D visualization. Provides an alternative to RViz with a built-in viewer window.
 

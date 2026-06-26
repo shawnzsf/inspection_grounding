@@ -47,10 +47,6 @@ fusion_node:
     annotation_mode: mask
     # Path to COCO-format segmentation JSON (used when annotation_mode='mask')
     mask_json_path: /home/robot/fastlio_ws/masks/2026-6-22-IWLG/sam3_tracking_segmentation.json
-    # Bbox visualization depth in camera frame (metres)
-    bbox_vis_depth: 2.0
-    # Tolerance for matching YAML files to LiDAR timestamps (nanoseconds)
-    yaml_match_tolerance_ns: 100000000   # 100 ms
     # Undistorted intrinsics (left camera, 3040×4032 half-res)
     fx: 1190.4990185909498
     fy: 1190.344769418459
