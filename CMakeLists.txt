@@ -12,6 +12,7 @@ find_package(rclpy REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 
 # 2. Generate the custom message: SyncedSensorData
 #    Used by sync_node to publish synchronized image + LiDAR data
@@ -27,6 +28,7 @@ install(PROGRAMS
   src/fusion_node.py
   src/rerun_bridge_node.py
   src/inspection_db.py
+  src/pose_interpolator.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

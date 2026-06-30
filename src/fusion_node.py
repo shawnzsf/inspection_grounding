@@ -12,13 +12,16 @@ This node:
 7. Visualizes bbox in RViz
 """
 
+import bisect
 import json
 import os
+from collections import deque
 from pathlib import Path
 
 import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseStamped, Point
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from rclpy.time import Time
@@ -30,6 +33,7 @@ import tf2_ros
 import yaml
 
 from inspection_db import InspectionDB
+from pose_interpolator import interpolate_pose
 
 
 def quat_to_rotmat(q):
@@ -56,6 +60,10 @@ class FusionYamlNode(Node):
         # Scale factor for bbox coordinates if annotation resolution differs
         # from the camera intrinsics resolution. Set to 1.0 when they match.
         self.declare_parameter('bbox_scale', 1.0)
+        # Depth (metres) used when visualizing bbox markers in RViz
+        # self.declare_parameter('bbox_vis_depth', 5.0)
+        # Tolerance (nanoseconds) when matching YAML filenames to cloud timestamps
+        # self.declare_parameter('yaml_match_tolerance_ns', 100_000_000)
         # Annotation mode: 'bbox' (per-timestamp YAML files) or 'mask' (COCO JSON)
         self.declare_parameter('annotation_mode', 'mask')
         # Path to COCO-format segmentation JSON (used when annotation_mode='mask')
@@ -71,6 +79,8 @@ class FusionYamlNode(Node):
         # Set image width to calculate scaling factor for projection
         self.img_width = self.declare_parameter('image_width', 3040).value
         self.img_height = self.declare_parameter('image_height', 4032).value
+        # Max odometry entries to buffer (~30 s at 10 Hz)
+        self.declare_parameter('odom_buffer_size', 300)
 
         self.yaml_dir = Path(self.get_parameter('yaml_dir').value)
         self.output_dir = Path(self.get_parameter('output_dir').value)
@@ -79,8 +89,8 @@ class FusionYamlNode(Node):
         self.bbox_scale = float(self.get_parameter('bbox_scale').value)
         self.annotation_mode = str(self.get_parameter('annotation_mode').value).lower()
         self.mask_json_path = str(self.get_parameter('mask_json_path').value)
-        self.bbox_vis_depth = float(self.get_parameter('bbox_vis_depth').value)
-        self.yaml_match_tolerance_ns = int(self.get_parameter('yaml_match_tolerance_ns').value)
+        # self.bbox_vis_depth = float(self.get_parameter('bbox_vis_depth').value)
+        # self.yaml_match_tolerance_ns = int(self.get_parameter('yaml_match_tolerance_ns').value)
 
         # Pre-load COCO JSON if in mask mode
         self._mask_data = None
@@ -130,9 +140,30 @@ class FusionYamlNode(Node):
         )
         self.sub_pc = self.create_subscription(SyncedSensorData, '/synced_sensor_data', self.syncMsg_callback, syncMsg_qos)
 
+        # Odometry subscription (RELIABLE QoS — FAST-LIO publishes reliably)
+        odom_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=100
+        )
+        self.sub_odom = self.create_subscription(
+            Odometry, '/Odometry', self._odom_callback, odom_qos
+        )
+
+        # Odometry buffer: list of (timestamp_ns, translation(3,), quaternion(4,))
+        # kept sorted by timestamp_ns, trimmed to odom_buffer_size
+        self._odom_buffer = []
+        self._odom_buffer_size = int(self.get_parameter('odom_buffer_size').value)
+
+        # Pending sync messages waiting for odometry to catch up
+        self._pending_sync_msgs = deque(maxlen=10)
+
         # Cache for republishing (ensures RViz receives data even with single-shot triggers)
         self.last_pc_msg = None
         self.last_stamp = None
+        # Interpolated pose from odometry (used for DB logging)
+        self._last_interp_translation = None
+        self._last_interp_quaternion = None
 
         # Accumulated points across all frames (in target/global frame)
         self.aggregated_pts = None  # (N, 3) array or None
@@ -532,15 +563,126 @@ class FusionYamlNode(Node):
                 f.write(f"{x:.6f} {y:.6f} {z:.6f}\n")
         return True
 
-    def syncMsg_callback(self, msg):
+    # ------------------------------------------------------------------
+    # Odometry buffering & pose interpolation
+    # ------------------------------------------------------------------
+
+    def _odom_callback(self, msg):
+        """Buffer odometry messages and retry pending sync messages."""
+        t_ns = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
+        pos = np.array([
+            msg.pose.pose.position.x,
+            msg.pose.pose.position.y,
+            msg.pose.pose.position.z,
+        ], dtype=np.float64)
+        quat = np.array([
+            msg.pose.pose.orientation.x,
+            msg.pose.pose.orientation.y,
+            msg.pose.pose.orientation.z,
+            msg.pose.pose.orientation.w,
+        ], dtype=np.float64)
+
+        self._odom_buffer.append((t_ns, pos, quat))
+
+        # Trim to max size (drop oldest)
+        if len(self._odom_buffer) > self._odom_buffer_size:
+            self._odom_buffer = self._odom_buffer[-self._odom_buffer_size:]
+
+        # Retry any pending sync messages that now have bracketing odometry
+        self._process_pending_sync_msgs()
+
+    def _get_interpolated_pose(self, target_ns):
+        """Return interpolated (translation, quaternion) at *target_ns*.
+
+        Returns:
+            (translation(3,), quaternion(4,)) tuple, or None if the second
+            bracketing odometry frame has not arrived yet.
+        """
+        if len(self._odom_buffer) < 2:
+            return None
+
+        times = [e[0] for e in self._odom_buffer]
+
+        # target is at or before the first frame → clamp to first
+        if target_ns <= times[0]:
+            return self._odom_buffer[0][1].copy(), self._odom_buffer[0][2].copy()
+
+        # target is after the last frame → second frame not available yet
+        if target_ns > times[-1]:
+            return None
+
+        # Binary search for the insertion point
+        idx = bisect.bisect_left(times, target_ns)
+
+        # Exact match
+        if idx < len(times) and times[idx] == target_ns:
+            return self._odom_buffer[idx][1].copy(), self._odom_buffer[idx][2].copy()
+
+        # Interpolate between idx-1 and idx
+        t1, p1, q1 = self._odom_buffer[idx - 1]
+        t2, p2, q2 = self._odom_buffer[idx]
+        return interpolate_pose(t1, p1, q1, t2, p2, q2, target_ns)
+
+    def _process_pending_sync_msgs(self):
+        """Process queued sync messages whose odometry has caught up.
+
+        Iterates in FIFO order and stops at the first message that still
+        cannot be interpolated, preserving temporal ordering.
+        """
+        if not self._pending_sync_msgs:
+            return
+
+        remaining = deque()
+        while self._pending_sync_msgs:
+            msg = self._pending_sync_msgs.popleft()
+            stamp = msg.header.stamp
+            stamp_ns = stamp.sec * 1_000_000_000 + stamp.nanosec
+            pose = self._get_interpolated_pose(stamp_ns)
+            if pose is None:
+                remaining.append(msg)
+                break  # stop — later messages are also not ready
+            self._last_interp_translation, self._last_interp_quaternion = pose
+            self.syncMsg_callback(msg, _skip_interpolation=True)
+
+        # Put unprocessed messages back
+        self._pending_sync_msgs.extendleft(reversed(remaining))
+
+    # ------------------------------------------------------------------
+    # Main callback
+    # ------------------------------------------------------------------
+
+    def syncMsg_callback(self, msg, _skip_interpolation=False):
         """Main callback: match annotation, project, segment, publish.
 
         Supports two annotation modes controlled by the 'annotation_mode' parameter:
         - 'bbox': per-timestamp YAML files with bounding boxes
         - 'mask': single COCO-format JSON with segmentation polygons
+
+        Args:
+            msg: SyncedSensorData message.
+            _skip_interpolation: If True, skip pose interpolation (used when
+                called from _process_pending_sync_msgs, which has already set
+                the interpolated pose).
         """
         stamp = msg.header.stamp
         stamp_ns = int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+
+        # ------------------------------------------------------------------
+        # Step 0: Pose interpolation from odometry buffer
+        # ------------------------------------------------------------------
+        # Try to get the interpolated pose at the message timestamp. If the
+        # second bracketing odometry frame hasn't arrived yet, queue the
+        # message for deferred processing.
+        if not _skip_interpolation:
+            pose = self._get_interpolated_pose(stamp_ns)
+            if pose is None:
+                self._pending_sync_msgs.append(msg)
+                self.get_logger().debug(
+                    f"Deferring msg {stamp_ns}: odometry not yet available "
+                    f"(pending: {len(self._pending_sync_msgs)})"
+                )
+                return
+            self._last_interp_translation, self._last_interp_quaternion = pose
 
         # ------------------------------------------------------------------
         # Step 1: Load annotations based on mode
@@ -618,6 +760,7 @@ class FusionYamlNode(Node):
 
             source_frame = msg.pointcloud.header.frame_id
             T_cam_src = self._lookup_transform_matrix(self.camera_frame, source_frame, stamp)
+
             pts_cam = self._transform_points(pts_src, T_cam_src)
 
             # Project to image plane (scale intrinsics if stored dimensions known)
@@ -728,7 +871,10 @@ class FusionYamlNode(Node):
                 # Get sensor pose (camera_init → body) for DB storage
                 tf_translation = None
                 tf_rotation = None
-                if source_frame != self.target_frame:
+                if self._last_interp_translation is not None:
+                    tf_translation = tuple(self._last_interp_translation)
+                    tf_rotation = tuple(self._last_interp_quaternion)
+                elif source_frame != self.target_frame:
                     try:
                         tf_translation, tf_rotation = self._lookup_tf_pose(
                             self.target_frame, source_frame, stamp

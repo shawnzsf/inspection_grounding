@@ -22,6 +22,7 @@
   <depend>tf2_geometry_msgs</depend>
   <depend>sensor_msgs_py</depend>
   <depend>visualization_msgs</depend>
+  <depend>nav_msgs</depend>
 
   <!-- Required for message generation -->
   <member_of_group>rosidl_interface_packages</member_of_group>

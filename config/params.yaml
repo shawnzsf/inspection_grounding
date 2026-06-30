@@ -57,6 +57,8 @@ fusion_node:
     # Inspection database (per-observation + per-track aggregation)
     enable_db: true
     db_path: /home/robot/fastlio_ws/inspection.db
+    # Max odometry entries to buffer (~30 s at 10 Hz)
+    odom_buffer_size: 300
 
 # ---------------------------------------------------------------------------
 # Rerun Bridge Node — visualizes ROS 2 topics in Rerun
